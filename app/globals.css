@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root[data-theme="light"]  { --bg: 255 255 255; --fg: 15 23 42;   --card: 245 246 248; --accent: 6 182 212; }
+:root[data-theme="dark"]   { --bg: 2 6 23;      --fg: 240 249 255; --card: 17 24 39;   --accent: 6 182 212; }
+:root[data-theme="matrix"] { --bg: 0 0 0;        --fg: 0 255 156;   --card: 0 0 0;      --accent: 0 255 156; }
+
+body { background-color: rgb(var(--bg)); color: rgb(var(--fg)); }
+.prose a { color: rgb(var(--accent)); }
+
+:root[data-theme="matrix"] .border { border-color: rgba(0,255,156,.25) !important; }
+:root[data-theme="matrix"] button  { box-shadow: 0 0 8px rgba(0,255,156,.3); }
