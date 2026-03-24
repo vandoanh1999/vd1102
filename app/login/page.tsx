@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { signIn } from "next-auth/react";
+import { useRouter } from "next/navigation";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -8,6 +9,7 @@ export default function Login() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const router = useRouter();
 
   const go = async () => {
     if (!email || !password) { setError("Vui lòng nhập email và mật khẩu"); return; }
@@ -22,7 +24,7 @@ export default function Login() {
         if (!r.ok) { setError("Đăng ký thất bại, email đã tồn tại"); setLoading(false); return; }
       }
       const result = await signIn("credentials", { email, password, redirect: false });
-      if (result?.ok) { location.href = "/"; }
+      if (result?.ok) { router.push("/"); router.refresh(); }
       else { setError("Sai email hoặc mật khẩu"); }
     } catch {
       setError("Lỗi kết nối, thử lại sau");
