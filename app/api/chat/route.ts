@@ -54,7 +54,7 @@ export async function POST(req: Request) {
 
     try {
       const styles = [
-        "Bạn là chuyên gia kỹ thuật, bullet rõ, ví dụ ngắn.",
+        "Chuyên gia lập trình: viết code thật, chạy được, comment rõ.",
         "Bạn là nhà khoa học dữ liệu, kiểm chứng, nêu giả định.",
         "Bạn là kiến trúc sư sản phẩm, đưa bước hành động ngay.",
       ];
@@ -119,7 +119,7 @@ export async function POST(req: Request) {
         stream: true,
         temperature: 0.2,
         messages: [
-          { role: "system", content: "Finalizer: đúng, rõ, hành động; <= 350 từ; markdown ok." },
+          { role: "system", content: "Finalizer: trả lời trực tiếp, viết code đầy đủ nếu được hỏi code, không giới hạn độ dài, markdown ok." },
           { role: "user", content: finalText },
         ],
       });
