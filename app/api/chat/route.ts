@@ -1,3 +1,4 @@
+import { validator, hasher, monitor, batchProcessor } from "@/lib/security";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { openai, MODEL_PRIMARY, MODEL_JUDGE, N_BEST } from "@/lib/openai";
@@ -11,6 +12,16 @@ export async function POST(req: Request) {
   const body = await req.json();
   const { conversationId, prompt } = body as { conversationId?: string; prompt: string };
 
+  // ── 1. BẢO MẬT: validate input trước khi làm bất cứ điều gì ──
+  const validation = validator.validate(prompt);
+  if (!validation.isValid) {
+    return Response.json(
+      { error: "Nội dung không hợp lệ", threats: validation.threats },
+      { status: 400 }
+    );
+  }
+  const safePrompt = validation.sanitized;
+
   const user = await prisma.user.findUnique({ where: { email: session.user.email } });
   if (!user) return new Response("Unauthorized", { status: 401 });
 
@@ -19,14 +30,28 @@ export async function POST(req: Request) {
 
   const conv = conversationId
     ? await prisma.conversation.findUnique({ where: { id: conversationId } })
-    : await prisma.conversation.create({ data: { userId: user.id, title: prompt.slice(0, 60) } });
+    : await prisma.conversation.create({ data: { userId: user.id, title: safePrompt.slice(0, 60) } });
   if (!conv) return new Response("No conversation", { status: 400 });
 
-  await prisma.message.create({ data: { conversationId: conv.id, role: "user", content: prompt } });
+  // ── 2. SHA3: tạo fingerprint cho message ──
+  const inputHash = hasher.fingerprint(user.id, safePrompt);
+
+  await prisma.message.create({
+    data: {
+      conversationId: conv.id,
+      role: "user",
+      content: safePrompt,
+      // lưu hash vào attachments (không cần thay đổi schema)
+      attachments: { inputHash },
+    },
+  });
 
   const { stream, send, close } = sse();
 
   (async () => {
+    // ── 3. MONITOR: bắt đầu đo toàn bộ request ──
+    const stopTotal = monitor.start("chat.total");
+
     try {
       const styles = [
         "Bạn là chuyên gia kỹ thuật, bullet rõ, ví dụ ngắn.",
@@ -35,21 +60,35 @@ export async function POST(req: Request) {
       ];
       const k = judgeEnabled ? Math.min(N_BEST, styles.length) : 1;
 
-      const calls = Array.from({ length: k }).map((_, i) =>
-        openai.chat.completions.create({
-          model: MODEL_PRIMARY,
-          temperature: 0.7 - i * 0.2,
-          messages: [
-            { role: "system", content: styles[i] || styles[0] },
-            { role: "user", content: prompt },
-          ],
-        })
+      // ── 4. BATCH: gọi AI song song qua batchProcessor ──
+      const stopCandidates = monitor.start("chat.candidates");
+      const batchResult = await batchProcessor.processBatch(
+        Array.from({ length: k }, (_, i) => i),
+        async (i) =>
+          openai.chat.completions.create({
+            model: MODEL_PRIMARY,
+            temperature: 0.7 - i * 0.2,
+            messages: [
+              { role: "system", content: styles[i] || styles[0] },
+              { role: "user", content: safePrompt },
+            ],
+          })
       );
-      const outs = await Promise.all(calls);
-      const candidates = outs.map((o, i) => ({ idx: i, text: o.choices[0].message?.content?.trim() || "" }));
+      stopCandidates();
+
+      const candidates = batchResult.results
+        .filter((r) => r.value !== null)
+        .map((r, i) => ({
+          idx: i,
+          text: r.value!.choices[0].message?.content?.trim() || "",
+        }));
+
+      if (candidates.length === 0) throw new Error("Tất cả AI calls thất bại");
 
       let finalText = candidates[0].text;
+
       if (judgeEnabled && candidates.length > 1) {
+        const stopJudge = monitor.start("chat.judge");
         const judge = await openai.chat.completions.create({
           model: MODEL_JUDGE,
           temperature: 0,
@@ -58,16 +97,23 @@ export async function POST(req: Request) {
             { role: "system", content: "Bạn là Referee, trả JSON đúng schema." },
             {
               role: "user",
-              content: `Chấm điểm và chọn best (0-10: accuracy, clarity, actionability, brevity). Trả JSON: {"scores":[],"best_idx":0,"synthesis":"..."}.\nPrompt: ${prompt}\n\nCandidates:\n${candidates.map(c => `#${c.idx}\n${c.text}`).join("\n\n")}`,
+              content: `Chấm điểm và chọn best (0-10: accuracy, clarity, actionability, brevity). Trả JSON: {"scores":[],"best_idx":0,"synthesis":"..."}.\nPrompt: ${safePrompt}\n\nCandidates:\n${candidates.map((c) => `#${c.idx}\n${c.text}`).join("\n\n")}`,
             },
           ],
         });
+        stopJudge();
+
         let verdict: any = {};
         try { verdict = JSON.parse(judge.choices[0].message?.content || "{}"); } catch { /* ignore */ }
         finalText = verdict?.synthesis || candidates[verdict?.best_idx ?? 0]?.text || finalText;
-        send({ type: "meta", verdict, candidates });
+
+        // Gửi kèm stats về client
+        const stats = monitor.getStats("chat.candidates");
+        send({ type: "meta", verdict, candidates, stats });
       }
 
+      // ── 5. MONITOR: đo bước refine/stream ──
+      const stopRefine = monitor.start("chat.refine");
       const refine = await openai.chat.completions.create({
         model: MODEL_JUDGE,
         stream: true,
@@ -83,10 +129,32 @@ export async function POST(req: Request) {
         const delta = chunk.choices?.[0]?.delta?.content || "";
         if (delta) { acc += delta; send({ type: "token", token: delta }); }
       }
+      stopRefine();
 
-      await prisma.message.create({ data: { conversationId: conv.id, role: "assistant", content: acc } });
-      send({ type: "done", conversationId: conv.id });
+      // Hash output trước khi lưu
+      const outputHash = hasher.fingerprint(user.id, acc);
+
+      await prisma.message.create({
+        data: {
+          conversationId: conv.id,
+          role: "assistant",
+          content: acc,
+          attachments: { outputHash },
+        },
+      });
+
+      stopTotal();
+
+      send({
+        type: "done",
+        conversationId: conv.id,
+        // Gửi performance stats về client (tuỳ chọn hiển thị UI)
+        perf: monitor.getStats(),
+      });
+
     } catch (e) {
+      monitor.recordError("chat.total");
+      stopTotal();
       send({ type: "error", message: String(e) });
     } finally {
       close();
