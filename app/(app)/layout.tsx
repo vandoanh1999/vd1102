@@ -9,7 +9,7 @@ export default async function Layout({ children }: { children: React.ReactNode }
       <Sidebar />
       <main className="p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <div className="text-lg font-semibold">VNAI</div>
+          <div className="text-lg font-semibold">VNAI <span className="text-xs font-normal text-rose-300/80">AI mỏ hỗn</span></div>
           <div className="flex items-center gap-3 text-sm">
             <ThemeSwitcher />
             {session?.user ? (

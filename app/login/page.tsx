@@ -21,7 +21,7 @@ export default function Login() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),
         });
-        if (!r.ok) { setError("Đăng ký thất bại, email đã tồn tại"); setLoading(false); return; }
+        if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.error || "Đăng ký thất bại, thử lại sau"); setLoading(false); return; }
       }
       const result = await signIn("credentials", { email, password, redirect: false });
       if (result?.ok) { router.push("/"); router.refresh(); }
@@ -35,7 +35,11 @@ export default function Login() {
   return (
     <div className="min-h-screen grid place-items-center bg-gray-950">
       <div className="w-full max-w-sm space-y-3 p-6 rounded-lg border border-cyan-500/30 bg-gray-900/70">
-        <div className="text-center text-cyan-300 text-lg font-semibold">VNAI Account</div>
+        <div className="text-center space-y-1">
+          <div className="text-4xl">🤬</div>
+          <div className="text-rose-300 text-xl font-semibold">VNAI — AI mỏ hỗn</div>
+          <div className="text-xs text-gray-400">Hỏi gì cũng trả lời đúng. Hỏi ngu là ăn chửi.</div>
+        </div>
         {error && <div className="text-red-400 text-xs text-center">{error}</div>}
         <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" type="email"
           className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:outline-none focus:border-cyan-500" />

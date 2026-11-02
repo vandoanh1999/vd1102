@@ -1,161 +1,139 @@
-import { validator, hasher, monitor, batchProcessor } from "@/lib/security";
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { openai, MODEL_PRIMARY, MODEL_JUDGE, N_BEST } from "@/lib/openai";
-import { FEATURES } from "@/lib/plans";
+import { prisma, withDbRetry } from "@/lib/prisma";
+import { groq, CHAT_MODELS, friendlyAIError } from "@/lib/llm";
+import { PLANS } from "@/lib/plans";
+import { LEVELS, isLevel, systemPrompt, detectCrisis, type Level } from "@/lib/persona";
 import { sse } from "@/lib/sse";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const MAX_PROMPT_CHARS = 4_000;
+const HISTORY_MESSAGES = 20;
+
+/** Tin nhắn cũ từng bị mã hoá HTML khi lưu — giải mã lại trước khi đưa cho AI. */
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'").replace(/&#x2F;/g, "/").replace(/&amp;/g, "&");
+}
+
+/** Mốc 0 giờ hôm nay theo giờ Việt Nam (UTC+7). */
+function startOfTodayVN(): Date {
+  const offset = 7 * 3600_000;
+  const vn = new Date(Date.now() + offset);
+  return new Date(Date.UTC(vn.getUTCFullYear(), vn.getUTCMonth(), vn.getUTCDate()) - offset);
+}
+
+const json = (body: unknown, status: number) => Response.json(body, { status });
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session?.user?.email) return new Response("Unauthorized", { status: 401 });
+  if (!session?.user?.email) return json({ error: "Đăng nhập đã rồi hẵng chửi nhau." }, 401);
 
-  const body = await req.json();
-  const { conversationId, prompt } = body as { conversationId?: string; prompt: string };
+  let body: { conversationId?: string; prompt?: string; level?: string; adult?: boolean };
+  try { body = await req.json(); } catch { return json({ error: "Dữ liệu gửi lên bị lỗi." }, 400); }
 
-  // ── 1. BẢO MẬT: validate input trước khi làm bất cứ điều gì ──
-  const validation = validator.validate(prompt);
-  if (!validation.isValid) {
-    return Response.json(
-      { error: "Nội dung không hợp lệ", threats: validation.threats },
-      { status: 400 }
-    );
+  const prompt = (body.prompt || "").trim();
+  if (!prompt) return json({ error: "Gửi tin trống thì tao trả lời bằng niềm tin à?" }, 400);
+  if (prompt.length > MAX_PROMPT_CHARS)
+    return json({ error: `Viết sớ à? Tối đa ${MAX_PROMPT_CHARS} ký tự thôi.` }, 400);
+
+  const user = await withDbRetry(() =>
+    prisma.user.findUnique({ where: { email: session.user!.email! } })
+  );
+  if (!user) return json({ error: "Không tìm thấy tài khoản." }, 401);
+  const plan = PLANS[user.plan];
+
+  // ── Cấp độ chửi ──
+  let level: Level = isLevel(body.level) ? body.level : "khia";
+  if (!plan.levels.includes(level)) level = "khia";
+  if (LEVELS[level].adult && body.adult !== true)
+    return json({ error: "Chế độ Mất dạy cần xác nhận đủ 18 tuổi." }, 403);
+
+  // ── Giới hạn số câu mỗi ngày ──
+  let usedToday = 0;
+  if (plan.messages_per_day > 0) {
+    usedToday = await prisma.message.count({
+      where: { role: "user", createdAt: { gte: startOfTodayVN() }, conversation: { userId: user.id } },
+    });
+    if (usedToday >= plan.messages_per_day)
+      return json({
+        error: `Hết ${plan.messages_per_day} câu miễn phí hôm nay rồi. Mai quay lại ăn chửi tiếp nhé.`,
+        limit: true,
+      }, 429);
   }
-  const safePrompt = validation.sanitized;
 
-  const user = await prisma.user.findUnique({ where: { email: session.user.email } });
-  if (!user) return new Response("Unauthorized", { status: 401 });
+  // ── Cuộc trò chuyện: chỉ được mở cuộc của chính mình ──
+  const conv = body.conversationId
+    ? await prisma.conversation.findFirst({ where: { id: body.conversationId, userId: user.id } })
+    : await prisma.conversation.create({ data: { userId: user.id, title: prompt.slice(0, 60) } });
+  if (!conv) return json({ error: "Không tìm thấy cuộc trò chuyện." }, 404);
 
-  const plan = user.plan;
-  const judgeEnabled = FEATURES[plan].judge;
-
-  const conv = conversationId
-    ? await prisma.conversation.findUnique({ where: { id: conversationId } })
-    : await prisma.conversation.create({ data: { userId: user.id, title: safePrompt.slice(0, 60) } });
-  if (!conv) return new Response("No conversation", { status: 400 });
-
-  // ── 2. SHA3: tạo fingerprint cho message ──
-  const inputHash = hasher.fingerprint(user.id, safePrompt);
-
-  await prisma.message.create({
-    data: {
-      conversationId: conv.id,
-      role: "user",
-      content: safePrompt,
-      // lưu hash vào attachments (không cần thay đổi schema)
-      attachments: { inputHash },
-    },
+  // ── Lịch sử để AI nhớ ngữ cảnh ──
+  const recent = await prisma.message.findMany({
+    where: { conversationId: conv.id },
+    orderBy: { createdAt: "desc" },
+    take: HISTORY_MESSAGES,
+    select: { role: true, content: true },
   });
+  const history: { role: "user" | "assistant"; content: string }[] = [];
+  let budget = plan.history_chars;
+  for (const m of recent) {
+    const role = m.role === "user" ? "user" : m.role === "assistant" ? "assistant" : null;
+    if (!role) continue;
+    const content = decodeEntities(m.content);
+    if (content.length > budget) break;
+    budget -= content.length;
+    history.unshift({ role, content });
+  }
+
+  const crisis = detectCrisis(prompt);
+  await prisma.message.create({ data: { conversationId: conv.id, role: "user", content: prompt } });
+
+  const messages = [
+    { role: "system" as const, content: systemPrompt(level, crisis) },
+    ...history,
+    { role: "user" as const, content: prompt },
+  ];
 
   const { stream, send, close } = sse();
 
   (async () => {
-    // ── 3. MONITOR: bắt đầu đo toàn bộ request ──
-    const stopTotal = monitor.start("chat.total");
-
+    let answer = "";
+    let lastError: unknown;
     try {
-      const styles = [
-        "Chuyên gia lập trình: viết code thật, chạy được, comment rõ.",
-        "Bạn là nhà khoa học dữ liệu, kiểm chứng, nêu giả định.",
-        "Bạn là kiến trúc sư sản phẩm, đưa bước hành động ngay.",
-      ];
-      const k = judgeEnabled ? Math.min(N_BEST, styles.length) : 1;
-
-      // ── 4. BATCH: gọi AI song song qua batchProcessor ──
-      const stopCandidates = monitor.start("chat.candidates");
-      const batchResult = await batchProcessor.processBatch(
-        Array.from({ length: k }, (_, i) => i),
-        async (i) =>
-          openai.chat.completions.create({
-            model: MODEL_PRIMARY,
-            temperature: 0.7 - i * 0.2,
-            messages: [
-              { role: "system", content: styles[i] || styles[0] },
-              { role: "user", content: safePrompt },
-            ],
-          })
-      );
-      stopCandidates();
-
-      const candidates = batchResult.results
-        .filter((r) => r.value !== null)
-        .map((r, i) => ({
-          idx: i,
-          text: r.value!.choices[0].message?.content?.trim() || "",
-        }));
-
-      if (candidates.length === 0) throw new Error("Tất cả AI calls thất bại");
-
-      let finalText = candidates[0].text;
-
-      if (judgeEnabled && candidates.length > 1) {
-        const stopJudge = monitor.start("chat.judge");
-        const judge = await openai.chat.completions.create({
-          model: MODEL_JUDGE,
-          temperature: 0,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: "Bạn là Referee, trả JSON đúng schema." },
-            {
-              role: "user",
-              content: `Chấm điểm và chọn best (0-10: accuracy, clarity, actionability, brevity). Trả JSON: {"scores":[],"best_idx":0,"synthesis":"..."}.\nPrompt: ${safePrompt}\n\nCandidates:\n${candidates.map((c) => `#${c.idx}\n${c.text}`).join("\n\n")}`,
-            },
-          ],
-        });
-        stopJudge();
-
-        let verdict: any = {};
-        try { verdict = JSON.parse(judge.choices[0].message?.content || "{}"); } catch { /* ignore */ }
-        finalText = verdict?.synthesis || candidates[verdict?.best_idx ?? 0]?.text || finalText;
-
-        // Gửi kèm stats về client
-        const stats = monitor.getStats("chat.candidates");
-        send({ type: "meta", verdict, candidates, stats });
+      for (const model of CHAT_MODELS) {
+        try {
+          const completion = await groq.chat.completions.create({
+            model,
+            stream: true,
+            temperature: crisis ? 0.5 : LEVELS[level].temperature,
+            max_tokens: 1_500,
+            messages,
+          });
+          for await (const chunk of completion) {
+            const token = chunk.choices?.[0]?.delta?.content || "";
+            if (token) { answer += token; send({ type: "token", token }); }
+          }
+          lastError = undefined;
+          break;
+        } catch (e) {
+          lastError = e;
+          console.error(`[chat] model ${model} failed:`, (e as { status?: number })?.status, String(e));
+          if (answer) break; // đã stream được một phần thì không đổi model giữa chừng
+        }
       }
 
-      // ── 5. MONITOR: đo bước refine/stream ──
-      const stopRefine = monitor.start("chat.refine");
-      const refine = await openai.chat.completions.create({
-        model: MODEL_JUDGE,
-        stream: true,
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: "Finalizer: trả lời trực tiếp, viết code đầy đủ nếu được hỏi code, không giới hạn độ dài, markdown ok." },
-          { role: "user", content: finalText },
-        ],
-      });
+      if (!answer) throw lastError ?? new Error("Empty answer");
 
-      let acc = "";
-      for await (const chunk of refine) {
-        const delta = chunk.choices?.[0]?.delta?.content || "";
-        if (delta) { acc += delta; send({ type: "token", token: delta }); }
-      }
-      stopRefine();
+      await prisma.message.create({ data: { conversationId: conv.id, role: "assistant", content: answer } });
+      await prisma.conversation.update({ where: { id: conv.id }, data: { updatedAt: new Date() } });
 
-      // Hash output trước khi lưu
-      const outputHash = hasher.fingerprint(user.id, acc);
-
-      await prisma.message.create({
-        data: {
-          conversationId: conv.id,
-          role: "assistant",
-          content: acc,
-          attachments: { outputHash },
-        },
-      });
-
-      stopTotal();
-
-      send({
-        type: "done",
-        conversationId: conv.id,
-        // Gửi performance stats về client (tuỳ chọn hiển thị UI)
-        perf: monitor.getStats(),
-      });
-
+      const remaining = plan.messages_per_day > 0 ? Math.max(0, plan.messages_per_day - usedToday - 1) : -1;
+      send({ type: "done", conversationId: conv.id, remaining, crisis });
     } catch (e) {
-      monitor.recordError("chat.total");
-      stopTotal();
-      send({ type: "error", message: String(e) });
+      send({ type: "error", message: friendlyAIError(e), conversationId: conv.id });
     } finally {
       close();
     }
@@ -164,8 +142,8 @@ export async function POST(req: Request) {
   return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
     },
   });
 }

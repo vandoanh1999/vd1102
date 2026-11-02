@@ -1,15 +1,34 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import Uploader from "@/components/Uploader";
-import MessageBubble from "@/components/MessageBubble";
+import { useCallback, useEffect, useRef, useState } from "react";
+import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import MatrixCanvas from "@/components/MatrixCanvas";
+import { LEVELS, type Level } from "@/lib/persona";
+import { shareRoast } from "@/lib/shareCard";
+
+const SUGGESTIONS = [
+  "1 + 1 bằng mấy?",
+  "Trái đất hình gì vậy?",
+  "Viết code Python in ra Hello World",
+  "Làm sao để giàu nhanh?",
+  "Giải thích blockchain cho tôi",
+];
+
+// localStorage có thể bị chặn (ẩn danh) → luôn bọc try/catch.
+const store = {
+  get(k: string) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* bỏ qua */ } },
+};
 
 export default function ChatBox() {
   const [conversationId, setConv] = useState<string | undefined>();
-  const [messages, setMessages] = useState<any[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [att, setAtt] = useState<string[]>([]);
   const [thinking, setThinking] = useState(false);
+  const [level, setLevel] = useState<Level>("khia");
+  const [adult, setAdult] = useState(false);
+  const [askAdult, setAskAdult] = useState(false);
+  const [remaining, setRemaining] = useState<number | null>(null);
+  const [sharingIdx, setSharingIdx] = useState<number | null>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [mode, setMode] = useState<"chat" | "enhance">("chat");
   // enhance state
@@ -22,19 +41,39 @@ export default function ChatBox() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  // Nhớ cấp độ và xác nhận 18+ của người dùng trên máy này.
+  useEffect(() => {
+    const isAdult = store.get("vnai.adult") === "1";
+    setAdult(isAdult);
+    const saved = store.get("vnai.level") as Level | null;
+    if (saved && saved in LEVELS && (!LEVELS[saved].adult || isAdult)) setLevel(saved);
+  }, []);
+
+  const openConversation = useCallback(async (id: string) => {
+    const r = await fetch(`/api/messages?conversationId=${encodeURIComponent(id)}`);
+    if (!r.ok) return;
+    const list = await r.json();
+    setConv(id);
+    setMessages(list.filter((m: any) => m.role === "user" || m.role === "assistant")
+      .map((m: any) => ({ role: m.role, content: m.content })));
+  }, []);
+
+  // Mở cuộc gần nhất khi vào trang; nghe Sidebar bấm chọn cuộc khác.
   useEffect(() => {
     (async () => {
       const r = await fetch("/api/conversations");
       if (r.ok) {
         const list = await r.json();
-        if (list[0]) {
-          setConv(list[0].id);
-          const m = await fetch(`/api/messages?conversationId=${list[0].id}`);
-          setMessages(await m.json());
-        }
+        if (list[0]) await openConversation(list[0].id);
       }
     })();
-  }, []);
+    const onOpen = (e: Event) => {
+      const id = (e as CustomEvent<string | null>).detail;
+      if (id) openConversation(id); else { setConv(undefined); setMessages([]); }
+    };
+    window.addEventListener("vnai:open", onOpen);
+    return () => window.removeEventListener("vnai:open", onOpen);
+  }, [openConversation]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
@@ -47,27 +86,61 @@ export default function ChatBox() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const send = async () => {
-    if (!input.trim() || thinking) return;
+  const pickLevel = (l: Level) => {
+    if (LEVELS[l].adult && !adult) { setAskAdult(true); return; }
+    setLevel(l); store.set("vnai.level", l);
+  };
+
+  const confirmAdult = () => {
+    setAdult(true); store.set("vnai.adult", "1");
+    setLevel("gat"); store.set("vnai.level", "gat");
+    setAskAdult(false);
+  };
+
+  const newConversation = () => {
+    setConv(undefined); setMessages([]);
+    window.dispatchEvent(new CustomEvent("vnai:refresh"));
+  };
+
+  const send = async (text?: string) => {
+    const prompt = (text ?? input).trim();
+    if (!prompt || thinking) return;
     setThinking(true);
-    const userMsg = { role: "user", content: input, attachments: att };
-    setMessages(prev => [...prev, userMsg]);
-    setInput(""); setAtt([]);
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId, prompt: input }),
-    });
-    const reader = res.body?.getReader();
-    const dec = new TextDecoder();
-    let ai = "";
-    while (reader) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const lines = dec.decode(value).split("\n").filter(l => l.startsWith("data:"));
-      for (const l of lines) {
-        try {
-          const payload = JSON.parse(l.slice(5));
+    setMessages(prev => [...prev, { role: "user", content: prompt }]);
+    setInput("");
+
+    const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId, prompt, level, adult }),
+      });
+
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        if (data.limit) setRemaining(0);
+        fail(data.error || `Lỗi máy chủ (${res.status}). Thử lại sau.`);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let ai = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        // Sự kiện SSE ngăn cách bằng dòng trống; giữ phần dở dang cho lần đọc sau.
+        const events = buf.split("\n\n");
+        buf = events.pop() || "";
+        for (const ev of events) {
+          const line = ev.split("\n").find(l => l.startsWith("data:"));
+          if (!line) continue;
+          let payload: any;
+          try { payload = JSON.parse(line.slice(5)); } catch { continue; }
           if (payload.type === "token") {
             ai += payload.token;
             setMessages(prev => {
@@ -77,11 +150,36 @@ export default function ChatBox() {
               }
               return [...prev, { role: "assistant", content: ai }];
             });
-          } else if (payload.type === "done") { setConv(payload.conversationId); setThinking(false); }
-          else if (payload.type === "error") { setThinking(false); }
-        } catch { }
+          } else if (payload.type === "done") {
+            setConv(payload.conversationId);
+            if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
+            if (payload.crisis) setMessages(prev => {
+              const cp = [...prev]; const last = cp[cp.length - 1];
+              if (last?.role === "assistant") cp[cp.length - 1] = { ...last, crisis: true };
+              return cp;
+            });
+            window.dispatchEvent(new CustomEvent("vnai:refresh"));
+          } else if (payload.type === "error") {
+            if (payload.conversationId) setConv(payload.conversationId);
+            fail(payload.message || "Có lỗi khi gọi AI.");
+          }
+        }
       }
+    } catch {
+      fail("Mất kết nối. Kiểm tra mạng rồi thử lại.");
+    } finally {
+      setThinking(false);
     }
+  };
+
+  const share = async (i: number) => {
+    const answer = messages[i];
+    const question = [...messages.slice(0, i)].reverse().find(m => m.role === "user");
+    if (!answer || !question) return;
+    setSharingIdx(i);
+    try { await shareRoast(question.content, answer.content); }
+    catch { setMessages(prev => [...prev, { role: "error", content: "Không tạo được ảnh. Thử lại nhé." }]); }
+    finally { setSharingIdx(null); }
   };
 
   const handleEnhanceFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -127,12 +225,17 @@ export default function ChatBox() {
 
   return (
     <div className="space-y-3">
-      <div className="border-b border-cyan-500/20 pb-2 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="border-b border-cyan-500/20 pb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-3 min-w-0">
           <button onClick={() => setMode("chat")}
-            className={`text-sm font-medium ${mode === "chat" ? "text-cyan-300 border-b border-cyan-300" : "text-gray-500"}`}>
-            VNAI Chat
+            className={`text-sm font-medium whitespace-nowrap ${mode === "chat" ? "text-rose-300 border-b border-rose-300" : "text-gray-500"}`}>
+            🤬 VNAI mỏ hỗn
           </button>
+          {mode === "chat" && messages.length > 0 && (
+            <button onClick={newConversation} className="text-xs text-gray-400 hover:text-cyan-300 whitespace-nowrap">
+              ＋ Cuộc mới
+            </button>
+          )}
           {mode === "enhance" && (
             <button onClick={() => setMode("enhance")}
               className="text-sm font-medium text-cyan-300 border-b border-cyan-300">
@@ -140,19 +243,59 @@ export default function ChatBox() {
             </button>
           )}
         </div>
-        <MatrixCanvas />
+        <div className="hidden sm:block"><MatrixCanvas /></div>
       </div>
 
       {/* CHAT MODE */}
       {mode === "chat" && (
         <>
-          <div className="h-[60vh] overflow-y-auto space-y-3 pr-1">
-            {messages.map((m, i) => <MessageBubble key={i} m={m} />)}
+          <div className="h-[58dvh] overflow-y-auto space-y-3 pr-1">
+            {messages.length === 0 && (
+              <div className="h-full flex flex-col items-center justify-center text-center gap-4 px-2">
+                <div className="text-5xl">🤬</div>
+                <div className="text-lg font-semibold text-rose-200">AI giả đần, mồm láo, nhưng biết tuốt.</div>
+                <div className="text-sm text-gray-400 max-w-md">
+                  Hỏi gì cũng trả lời đúng. Hỏi ngu thì ăn chửi. Chọn mức độ bên dưới rồi hỏi thử đi, đừng sợ.
+                </div>
+                <div className="flex flex-wrap justify-center gap-2 max-w-lg">
+                  {SUGGESTIONS.map(s => (
+                    <button key={s} onClick={() => send(s)} disabled={thinking}
+                      className="text-xs px-3 py-1.5 rounded-full border border-cyan-500/30 text-cyan-200 hover:bg-cyan-500/10">
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((m, i) => (
+              <MessageBubble key={i} m={m}
+                onShare={m.role === "assistant" ? () => share(i) : undefined}
+                sharing={sharingIdx === i} />
+            ))}
+            {thinking && messages[messages.length - 1]?.role === "user" && (
+              <div className="text-xs text-gray-400 animate-pulse">VNAI đang nghĩ câu chửi...</div>
+            )}
             <div ref={bottomRef} />
           </div>
-          <div className="flex items-center gap-2 relative">
+
+          {/* Chọn mức độ chửi */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {(Object.keys(LEVELS) as Level[]).map(l => (
+              <button key={l} onClick={() => pickLevel(l)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${level === l
+                  ? "border-rose-400 bg-rose-500/20 text-rose-100"
+                  : "border-gray-600 text-gray-400 hover:border-gray-400"}`}>
+                {LEVELS[l].emoji} {LEVELS[l].label}{LEVELS[l].adult ? " 18+" : ""}
+              </button>
+            ))}
+            {remaining !== null && (
+              <span className="text-xs text-gray-500 ml-auto">Còn {remaining} câu hôm nay</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
             {/* + menu */}
-            <div ref={menuRef} className="relative">
+            <div ref={menuRef} className="relative shrink-0">
               <button onClick={() => setShowMenu(v => !v)}
                 className="w-9 h-9 rounded-full border border-cyan-500/40 flex items-center justify-center text-cyan-400 hover:bg-cyan-500/10 text-xl font-light">
                 +
@@ -170,17 +313,38 @@ export default function ChatBox() {
 
             <input value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && !e.shiftKey && send()}
-              className="flex-1 bg-gray-800 border border-cyan-500/30 rounded px-3 py-2 text-sm focus:outline-none focus:border-cyan-500"
-              placeholder="Nhập tin nhắn..." disabled={thinking} />
-            <Uploader onUploaded={urls => setAtt(prev => [...prev, ...urls])} />
-            <button onClick={send} disabled={thinking}
-              className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 rounded disabled:opacity-50 text-sm font-medium">
-              {thinking ? "Đang tải..." : "Gửi"}
+              className="flex-1 min-w-0 bg-gray-800 border border-cyan-500/30 rounded px-3 py-2 text-sm focus:outline-none focus:border-rose-400"
+              placeholder="Hỏi đi, tao đang chờ..." disabled={thinking} maxLength={4000} />
+            <button onClick={() => send()} disabled={thinking || !input.trim()}
+              className="shrink-0 px-4 py-2 bg-gradient-to-r from-rose-500 to-fuchsia-600 rounded disabled:opacity-50 text-sm font-medium">
+              {thinking ? "..." : "Gửi"}
             </button>
           </div>
-          {att.length > 0 && (
-            <div className="text-xs text-cyan-300 flex flex-wrap gap-2">
-              {att.map((u, i) => <span key={i} className="underline break-all">{u}</span>)}
+          <p className="text-[11px] text-gray-500 text-center">
+            VNAI chửi cho vui, không nhằm xúc phạm ai. Đang buồn thật thì cứ nói thật, nó sẽ thôi diễn.
+          </p>
+
+          {/* Hộp xác nhận 18+ */}
+          {askAdult && (
+            <div className="fixed inset-0 z-50 bg-black/70 grid place-items-center p-4">
+              <div className="w-full max-w-sm rounded-xl border border-rose-500/40 bg-gray-900 p-5 space-y-3">
+                <div className="text-lg font-semibold text-rose-200">🤬 Chế độ Mất dạy (18+)</div>
+                <p className="text-sm text-gray-300">
+                  AI sẽ xưng mày – tao và chửi rất gắt. Nó vẫn không đụng tới vùng miền, tôn giáo, giới tính,
+                  ngoại hình hay chuyện riêng tư của bạn.
+                </p>
+                <p className="text-sm text-gray-300">Bạn xác nhận đã đủ 18 tuổi và tự nguyện ăn chửi?</p>
+                <div className="flex gap-2 pt-1">
+                  <button onClick={confirmAdult}
+                    className="flex-1 py-2 rounded bg-gradient-to-r from-rose-500 to-fuchsia-600 text-sm font-medium">
+                    Tôi đủ 18, chửi đi
+                  </button>
+                  <button onClick={() => setAskAdult(false)}
+                    className="flex-1 py-2 rounded border border-gray-600 text-sm text-gray-300">
+                    Thôi, sợ rồi
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </>

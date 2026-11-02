@@ -1,21 +1,22 @@
+import type { Level } from "@/lib/persona";
+
 export const PLANS = {
   FREE: {
-    name: "VD1102 Free",
-    price_usd: 0,
-    contextLimit: 8_000,
-    uploads: true,
-    judge: false,
-    messages_per_day: 50,
+    name: "VNAI Free",
+    price_vnd: 0,
+    messages_per_day: 30,
+    history_chars: 12_000,
+    // Giai đoạn kéo người dùng: mở cả 3 cấp độ. Khi có cổng thanh toán,
+    // chuyển "gat" sang chỉ dành cho PRO bằng cách bỏ nó khỏi danh sách này.
+    levels: ["hien", "khia", "gat"] as Level[],
   },
   PRO: {
-    name: "VD1102 Pro",
-    price_usd: 7,
-    contextLimit: 128_000,
-    uploads: true,
-    judge: true,
-    messages_per_day: -1, // unlimited
+    name: "VNAI Pro",
+    price_vnd: 49_000,
+    messages_per_day: -1, // không giới hạn
+    history_chars: 40_000,
+    levels: ["hien", "khia", "gat"] as Level[],
   },
 } as const;
 
-// Keep backward compat
-export const FEATURES = PLANS;
+export type PlanKey = keyof typeof PLANS;
