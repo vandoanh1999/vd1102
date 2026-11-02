@@ -4,6 +4,15 @@ import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import MatrixCanvas from "@/components/MatrixCanvas";
 import { LEVELS, type Level } from "@/lib/persona";
 import { shareRoast } from "@/lib/shareCard";
+import {
+  VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
+} from "@/lib/voice";
+
+type Phase = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
+
+const NO_VI_VOICE =
+  "Máy bạn chưa có giọng đọc tiếng Việt nên AI sẽ đọc lơ lớ. Android: vào Cài đặt → Chuyển văn bản sang lời nói → " +
+  "chọn công cụ của Google → tải giọng Tiếng Việt. iPhone: Cài đặt → Trợ năng → Nội dung được đọc → Giọng nói → Tiếng Việt.";
 
 const SUGGESTIONS = [
   "1 + 1 bằng mấy?",
@@ -20,7 +29,11 @@ const store = {
 };
 
 export default function ChatBox() {
-  const [conversationId, setConv] = useState<string | undefined>();
+  const [conversationId, setConvState] = useState<string | undefined>();
+  // Bản sao dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
+  const convRef = useRef<string | undefined>(undefined);
+  const adultRef = useRef(false);
+  const setConv = (id: string | undefined) => { convRef.current = id; setConvState(id); };
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -31,6 +44,19 @@ export default function ChatBox() {
   const [sharingIdx, setSharingIdx] = useState<number | null>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [mode, setMode] = useState<"chat" | "enhance">("chat");
+  // giọng nói
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [micLevel, setMicLevel] = useState(0);
+  const [speakOn, setSpeakOn] = useState(false);
+  const [callMode, setCallMode] = useState(false);
+  const [canVoice, setCanVoice] = useState(false);
+  const recorderRef = useRef<VoiceRecorder | null>(null);
+  const callRef = useRef(false);
+  const speakOnRef = useRef(false);
+  const levelRef = useRef<Level>("khia");
+  useEffect(() => { speakOnRef.current = speakOn; }, [speakOn]);
+  useEffect(() => { levelRef.current = level; }, [level]);
+  useEffect(() => { adultRef.current = adult; }, [adult]);
   // enhance state
   const [enhanceImg, setEnhanceImg] = useState<string | null>(null);
   const [enhanceMime, setEnhanceMime] = useState("image/jpeg");
@@ -47,6 +73,10 @@ export default function ChatBox() {
     setAdult(isAdult);
     const saved = store.get("vnai.level") as Level | null;
     if (saved && saved in LEVELS && (!LEVELS[saved].adult || isAdult)) setLevel(saved);
+    setSpeakOn(store.get("vnai.speak") === "1");
+    setCanVoice(voiceSupported());
+    recorderRef.current = new VoiceRecorder();
+    return () => { recorderRef.current?.release(); stopSpeaking(); callRef.current = false; };
   }, []);
 
   const openConversation = useCallback(async (id: string) => {
@@ -102,10 +132,13 @@ export default function ChatBox() {
     window.dispatchEvent(new CustomEvent("vnai:refresh"));
   };
 
-  const send = async (text?: string) => {
+  /** Gửi câu hỏi, stream câu trả lời lên màn hình; trả về toàn văn câu trả lời ("" nếu lỗi). */
+  const send = async (text?: string): Promise<string> => {
     const prompt = (text ?? input).trim();
-    if (!prompt || thinking) return;
+    if (!prompt || thinking) return "";
     setThinking(true);
+    let ai = "";
+    let ok = false;
     setMessages(prev => [...prev, { role: "user", content: prompt }]);
     setInput("");
 
@@ -115,20 +148,19 @@ export default function ChatBox() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId, prompt, level, adult }),
+        body: JSON.stringify({ conversationId: convRef.current, prompt, level: levelRef.current, adult: adultRef.current }),
       });
 
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
         if (data.limit) setRemaining(0);
         fail(data.error || `Lỗi máy chủ (${res.status}). Thử lại sau.`);
-        return;
+        return "";
       }
 
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
-      let ai = "";
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -151,6 +183,7 @@ export default function ChatBox() {
               return [...prev, { role: "assistant", content: ai }];
             });
           } else if (payload.type === "done") {
+            ok = true;
             setConv(payload.conversationId);
             if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
             if (payload.crisis) setMessages(prev => {
@@ -170,6 +203,99 @@ export default function ChatBox() {
     } finally {
       setThinking(false);
     }
+    return ok ? ai : "";
+  };
+
+  /* ───────────── Giọng nói ───────────── */
+
+  const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
+
+  const speakAnswer = async (text: string) => {
+    setPhase("speaking");
+    await speak(text, { rate: levelRef.current === "gat" ? 1.12 : 1.05 });
+    setPhase("idle");
+  };
+
+  /** Nghe một lượt. Trả về: chuỗi = đã nghe được; "" = nghe không rõ; null = không ai nói / lỗi micro. */
+  const listenOnce = async (): Promise<string | null> => {
+    const recorder = recorderRef.current;
+    if (!recorder) return null;
+    setPhase("listening");
+    let rec;
+    try {
+      rec = await recorder.start({ noSpeechMs: callRef.current ? 15_000 : 10_000, onLevel: setMicLevel });
+    } catch {
+      setPhase("idle");
+      fail("Không mở được micro. Cho phép trang này dùng micro trong cài đặt trình duyệt rồi thử lại.");
+      callRef.current = false;
+      return null;
+    }
+    setMicLevel(0);
+    if (!rec) { setPhase("idle"); return null; }
+    setPhase("transcribing");
+    const { text, error } = await transcribe(rec);
+    setPhase("idle");
+    if (error) { fail(error); return ""; }
+    return text;
+  };
+
+  /** Bấm micro: nói một câu, tự dừng khi im lặng (bấm lần nữa để dừng sớm). */
+  const micTap = async () => {
+    if (phase === "listening") { recorderRef.current?.stop(); return; }
+    if (thinking || phase !== "idle") return;
+    stopSpeaking();
+    if (speakOnRef.current) unlockSpeech();
+    const text = await listenOnce();
+    recorderRef.current?.release(); // tắt đèn micro sau khi nói xong
+    if (!text) return;
+    const ans = await send(text);
+    if (ans && speakOnRef.current) await speakAnswer(ans);
+  };
+
+  /** Gõ phím rồi gửi; nếu đang bật "Đọc to" thì đọc luôn câu trả lời. */
+  const sendTyped = async (text?: string) => {
+    if (speakOnRef.current) unlockSpeech(); // iOS: phải mở khoá trong lúc bấm
+    const ans = await send(text);
+    if (ans && speakOnRef.current) await speakAnswer(ans);
+  };
+
+  const toggleSpeak = async () => {
+    const next = !speakOn;
+    setSpeakOn(next); store.set("vnai.speak", next ? "1" : "0");
+    if (next) { unlockSpeech(); if (!(await hasVietnameseVoice())) fail(NO_VI_VOICE); }
+    else stopSpeaking();
+  };
+
+  const endCall = () => {
+    callRef.current = false;
+    setCallMode(false);
+    recorderRef.current?.release();
+    stopSpeaking();
+    setPhase("idle");
+    setMicLevel(0);
+  };
+
+  /** Chế độ gọi rảnh tay: nghe → trả lời → đọc to → nghe tiếp, đến khi bấm Kết thúc. */
+  const startCall = async () => {
+    if (callRef.current || thinking) return;
+    unlockSpeech();
+    stopSpeaking();
+    callRef.current = true;
+    setCallMode(true);
+    if (!(await hasVietnameseVoice())) fail(NO_VI_VOICE);
+    let silent = 0, unclear = 0;
+    while (callRef.current) {
+      const text = await listenOnce();
+      if (!callRef.current) break;
+      if (text === null) { if (++silent >= 2) { fail("Im lặng lâu quá, VNAI cúp máy đây."); break; } continue; }
+      if (!text) { if (++unclear >= 3) break; continue; }
+      silent = 0; unclear = 0;
+      setPhase("thinking");
+      const ans = await send(text);
+      if (!callRef.current) break;
+      if (ans) await speakAnswer(ans); else setPhase("idle");
+    }
+    endCall();
   };
 
   const share = async (i: number) => {
@@ -259,7 +385,7 @@ export default function ChatBox() {
                 </div>
                 <div className="flex flex-wrap justify-center gap-2 max-w-lg">
                   {SUGGESTIONS.map(s => (
-                    <button key={s} onClick={() => send(s)} disabled={thinking}
+                    <button key={s} onClick={() => sendTyped(s)} disabled={thinking || callMode}
                       className="text-xs px-3 py-1.5 rounded-full border border-cyan-500/30 text-cyan-200 hover:bg-cyan-500/10">
                       {s}
                     </button>
@@ -270,6 +396,7 @@ export default function ChatBox() {
             {messages.map((m, i) => (
               <MessageBubble key={i} m={m}
                 onShare={m.role === "assistant" ? () => share(i) : undefined}
+                onSpeak={m.role === "assistant" ? () => { unlockSpeech(); speakAnswer(m.content); } : undefined}
                 sharing={sharingIdx === i} />
             ))}
             {thinking && messages[messages.length - 1]?.role === "user" && (
@@ -288,6 +415,12 @@ export default function ChatBox() {
                 {LEVELS[l].emoji} {LEVELS[l].label}{LEVELS[l].adult ? " 18+" : ""}
               </button>
             ))}
+            <button onClick={toggleSpeak}
+              className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${speakOn
+                ? "border-cyan-400 bg-cyan-500/20 text-cyan-100"
+                : "border-gray-600 text-gray-400 hover:border-gray-400"}`}>
+              {speakOn ? "🔊 Đọc to" : "🔇 Đọc to"}
+            </button>
             {remaining !== null && (
               <span className="text-xs text-gray-500 ml-auto">Còn {remaining} câu hôm nay</span>
             )}
@@ -312,17 +445,69 @@ export default function ChatBox() {
             </div>
 
             <input value={input} onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && !e.shiftKey && send()}
+              onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendTyped()}
               className="flex-1 min-w-0 bg-gray-800 border border-cyan-500/30 rounded px-3 py-2 text-sm focus:outline-none focus:border-rose-400"
-              placeholder="Hỏi đi, tao đang chờ..." disabled={thinking} maxLength={4000} />
-            <button onClick={() => send()} disabled={thinking || !input.trim()}
-              className="shrink-0 px-4 py-2 bg-gradient-to-r from-rose-500 to-fuchsia-600 rounded disabled:opacity-50 text-sm font-medium">
-              {thinking ? "..." : "Gửi"}
-            </button>
+              placeholder={phase === "listening" ? "Đang nghe..." : phase === "transcribing" ? "Đang chép lời..." : "Hỏi đi, tao đang chờ..."}
+              disabled={thinking || phase !== "idle"} maxLength={4000} />
+            {canVoice && !input.trim() ? (
+              <>
+                <button onClick={micTap} disabled={thinking || callMode || (phase !== "idle" && phase !== "listening")}
+                  title="Bấm để nói (tự dừng khi bạn im lặng)"
+                  className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg disabled:opacity-50 ${phase === "listening" && !callMode
+                    ? "bg-rose-600 animate-pulse" : "bg-gray-800 border border-rose-400/50"}`}
+                  style={phase === "listening" && !callMode ? { boxShadow: `0 0 0 ${4 + micLevel * 14}px rgba(244,63,94,0.25)` } : undefined}>
+                  {phase === "transcribing" && !callMode ? "…" : "🎙️"}
+                </button>
+                <button onClick={startCall} disabled={thinking || callMode || phase !== "idle"} title="Gọi rảnh tay"
+                  className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg bg-gradient-to-r from-rose-500 to-fuchsia-600 disabled:opacity-50">
+                  📞
+                </button>
+              </>
+            ) : (
+              <button onClick={() => sendTyped()} disabled={thinking || !input.trim()}
+                className="shrink-0 px-4 py-2 bg-gradient-to-r from-rose-500 to-fuchsia-600 rounded disabled:opacity-50 text-sm font-medium">
+                {thinking ? "..." : "Gửi"}
+              </button>
+            )}
           </div>
           <p className="text-[11px] text-gray-500 text-center">
             VNAI chửi cho vui, không nhằm xúc phạm ai. Đang buồn thật thì cứ nói thật, nó sẽ thôi diễn.
           </p>
+
+          {/* Màn hình chế độ gọi */}
+          {callMode && (
+            <div className="fixed inset-0 z-40 bg-gray-950/95 flex flex-col items-center justify-between p-6">
+              <div className="text-center pt-6 space-y-1">
+                <div className="text-rose-300 font-semibold">📞 Đang gọi VNAI mỏ hỗn</div>
+                <div className="text-xs text-gray-400">{LEVELS[level].emoji} {LEVELS[level].label} · nói xong im 1 giây là nó tự trả lời</div>
+              </div>
+              <div className="flex flex-col items-center gap-6">
+                <div className="rounded-full bg-gradient-to-br from-rose-500 to-fuchsia-700 grid place-items-center text-6xl transition-transform duration-100"
+                  style={{ width: 160, height: 160, transform: `scale(${phase === "listening" ? 1 + micLevel * 0.35 : phase === "speaking" ? 1.08 : 1})` }}>
+                  {phase === "speaking" ? "🤬" : phase === "thinking" || phase === "transcribing" ? "🤔" : "👂"}
+                </div>
+                <div className="text-lg text-gray-200 h-7">
+                  {phase === "listening" ? "Đang nghe mày nói..." : phase === "transcribing" ? "Đang nghe lại..." :
+                    phase === "thinking" || thinking ? "Đang nghĩ câu chửi..." : phase === "speaking" ? "Đang chửi..." : "..."}
+                </div>
+                {messages.length > 0 && (
+                  <div className="max-w-md text-sm text-gray-400 text-center line-clamp-4 px-2">
+                    {messages[messages.length - 1].content}
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-3 pb-6">
+                {phase === "speaking" && (
+                  <button onClick={() => stopSpeaking()} className="px-5 py-3 rounded-full border border-gray-500 text-gray-200">
+                    ⏭ Ngắt lời
+                  </button>
+                )}
+                <button onClick={endCall} className="px-6 py-3 rounded-full bg-red-600 font-semibold">
+                  Kết thúc
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Hộp xác nhận 18+ */}
           {askAdult && (
