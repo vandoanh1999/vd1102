@@ -4,6 +4,7 @@ import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import MatrixCanvas from "@/components/MatrixCanvas";
 import { LEVELS, type Level } from "@/lib/persona";
 import { shareRoast } from "@/lib/shareCard";
+import { loadConvs, getConv, saveConv, deleteConv, newConvId, CHANGED_EVENT, type LocalConv, type StoredMessage } from "@/lib/localConvs";
 import {
   VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
 } from "@/lib/voice";
@@ -29,12 +30,14 @@ const store = {
 };
 
 export default function ChatBox() {
-  const [conversationId, setConvState] = useState<string | undefined>();
-  // Bản sao dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
-  const convRef = useRef<string | undefined>(undefined);
+  // Dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
+  const convRef = useRef<string>("");
   const adultRef = useRef(false);
-  const setConv = (id: string | undefined) => { convRef.current = id; setConvState(id); };
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const [history, setHistory] = useState<LocalConv[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [level, setLevel] = useState<Level>("khia");
@@ -79,30 +82,28 @@ export default function ChatBox() {
     return () => { recorderRef.current?.release(); stopSpeaking(); callRef.current = false; };
   }, []);
 
-  const openConversation = useCallback(async (id: string) => {
-    const r = await fetch(`/api/messages?conversationId=${encodeURIComponent(id)}`);
-    if (!r.ok) return;
-    const list = await r.json();
-    setConv(id);
-    setMessages(list.filter((m: any) => m.role === "user" || m.role === "assistant")
-      .map((m: any) => ({ role: m.role, content: m.content })));
+  const openConversation = useCallback((id: string | null) => {
+    stopSpeaking();
+    const c = id ? getConv(id) : undefined;
+    convRef.current = c ? c.id : newConvId();
+    setMessages(c ? c.messages : []);
+    setShowHistory(false);
   }, []);
 
-  // Mở cuộc gần nhất khi vào trang; nghe Sidebar bấm chọn cuộc khác.
+  // Mỗi lần mở trang là một cuộc mới; 5 cuộc gần nhất vẫn nằm trong Lịch sử trên máy này.
   useEffect(() => {
-    (async () => {
-      const r = await fetch("/api/conversations");
-      if (r.ok) {
-        const list = await r.json();
-        if (list[0]) await openConversation(list[0].id);
-      }
-    })();
-    const onOpen = (e: Event) => {
-      const id = (e as CustomEvent<string | null>).detail;
-      if (id) openConversation(id); else { setConv(undefined); setMessages([]); }
-    };
+    openConversation(null);
+    const refresh = () => setHistory(loadConvs());
+    refresh();
+    const onOpen = (e: Event) => openConversation((e as CustomEvent<string | null>).detail);
     window.addEventListener("vnai:open", onOpen);
-    return () => window.removeEventListener("vnai:open", onOpen);
+    window.addEventListener(CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh); // đồng bộ khi mở nhiều tab
+    return () => {
+      window.removeEventListener("vnai:open", onOpen);
+      window.removeEventListener(CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, [openConversation]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
@@ -127,10 +128,7 @@ export default function ChatBox() {
     setAskAdult(false);
   };
 
-  const newConversation = () => {
-    setConv(undefined); setMessages([]);
-    window.dispatchEvent(new CustomEvent("vnai:refresh"));
-  };
+  const newConversation = () => openConversation(null);
 
   /** Gửi câu hỏi, stream câu trả lời lên màn hình; trả về toàn văn câu trả lời ("" nếu lỗi). */
   const send = async (text?: string): Promise<string> => {
@@ -139,6 +137,12 @@ export default function ChatBox() {
     setThinking(true);
     let ai = "";
     let ok = false;
+    let crisis = false;
+    // Lịch sử của cuộc hiện tại (chỉ câu hỏi/trả lời, bỏ thông báo lỗi) gửi kèm để AI nhớ ngữ cảnh.
+    const past: StoredMessage[] = messagesRef.current
+      .filter((m): m is StoredMessage => m.role === "user" || m.role === "assistant")
+      .map(m => ({ role: m.role, content: m.content, ...(m.crisis ? { crisis: true } : {}) }));
+    const convId = convRef.current;
     setMessages(prev => [...prev, { role: "user", content: prompt }]);
     setInput("");
 
@@ -148,7 +152,12 @@ export default function ChatBox() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId: convRef.current, prompt, level: levelRef.current, adult: adultRef.current }),
+        body: JSON.stringify({
+          prompt,
+          history: past.slice(-20).map(m => ({ role: m.role, content: m.content })),
+          level: levelRef.current,
+          adult: adultRef.current,
+        }),
       });
 
       if (!res.ok || !res.body) {
@@ -184,16 +193,14 @@ export default function ChatBox() {
             });
           } else if (payload.type === "done") {
             ok = true;
-            setConv(payload.conversationId);
+            crisis = !!payload.crisis;
             if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
             if (payload.crisis) setMessages(prev => {
               const cp = [...prev]; const last = cp[cp.length - 1];
               if (last?.role === "assistant") cp[cp.length - 1] = { ...last, crisis: true };
               return cp;
             });
-            window.dispatchEvent(new CustomEvent("vnai:refresh"));
           } else if (payload.type === "error") {
-            if (payload.conversationId) setConv(payload.conversationId);
             fail(payload.message || "Có lỗi khi gọi AI.");
           }
         }
@@ -202,6 +209,12 @@ export default function ChatBox() {
       fail("Mất kết nối. Kiểm tra mạng rồi thử lại.");
     } finally {
       setThinking(false);
+      // Lưu cuộc trò chuyện xuống máy (kể cả khi lỗi, để không mất câu hỏi).
+      saveConv(convId, [
+        ...past,
+        { role: "user", content: prompt },
+        ...(ai ? [{ role: "assistant" as const, content: ai, ...(crisis ? { crisis: true } : {}) }] : []),
+      ]);
     }
     return ok ? ai : "";
   };
@@ -362,6 +375,12 @@ export default function ChatBox() {
               ＋ Cuộc mới
             </button>
           )}
+          {mode === "chat" && history.length > 0 && (
+            <button onClick={() => setShowHistory(v => !v)}
+              className="md:hidden text-xs text-gray-400 hover:text-cyan-300 whitespace-nowrap">
+              🕘 Lịch sử ({history.length})
+            </button>
+          )}
           {mode === "enhance" && (
             <button onClick={() => setMode("enhance")}
               className="text-sm font-medium text-cyan-300 border-b border-cyan-300">
@@ -371,6 +390,24 @@ export default function ChatBox() {
         </div>
         <div className="hidden sm:block"><MatrixCanvas /></div>
       </div>
+
+      {/* Lịch sử trên điện thoại (máy tính có cột bên trái) */}
+      {mode === "chat" && showHistory && (
+        <div className="md:hidden rounded-lg border border-cyan-500/20 bg-gray-900/90 p-2 space-y-1">
+          <div className="text-[11px] text-gray-500 px-1">5 cuộc gần nhất, chỉ lưu trên máy này</div>
+          {history.map(c => (
+            <div key={c.id} className="flex items-center gap-1">
+              <button onClick={() => openConversation(c.id)}
+                className={`flex-1 min-w-0 text-left text-sm truncate px-2 py-1.5 rounded border ${c.id === convRef.current
+                  ? "border-rose-400/60 bg-rose-500/10" : "border-cyan-500/20 bg-gray-800/70"}`}>
+                {c.title}
+              </button>
+              <button onClick={() => { deleteConv(c.id); if (c.id === convRef.current) openConversation(null); }}
+                className="shrink-0 px-2 text-gray-500 hover:text-red-400" title="Xoá">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* CHAT MODE */}
       {mode === "chat" && (

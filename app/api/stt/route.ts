@@ -1,5 +1,5 @@
 import { toFile } from "openai";
-import { auth } from "@/lib/auth";
+import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { groq, friendlyAIError } from "@/lib/llm";
 
 export const runtime = "nodejs";
@@ -23,8 +23,8 @@ function looksHallucinated(text: string): boolean {
 }
 
 export async function POST(req: Request) {
-  const session = await auth();
-  if (!session?.user?.email) return Response.json({ error: "Đăng nhập trước đã." }, { status: 401 });
+  const quota = await hit(`stt:${clientId(req)}`, LIMITS.sttPerClient);
+  if (!quota.ok) return Response.json({ error: "Hôm nay nói nhiều quá rồi, gõ phím đi." }, { status: 429 });
 
   let form: FormData;
   try { form = await req.formData(); } catch { return Response.json({ error: "Không đọc được ghi âm." }, { status: 400 }); }

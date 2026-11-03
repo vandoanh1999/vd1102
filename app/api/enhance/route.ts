@@ -1,11 +1,11 @@
-import { auth } from "@/lib/auth";
+import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import Groq from "groq-sdk";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export async function POST(req: Request) {
-  const session = await auth();
-  if (!session?.user?.email) return new Response("Unauthorized", { status: 401 });
+  const quota = await hit(`enhance:${clientId(req)}`, LIMITS.enhancePerClient);
+  if (!quota.ok) return Response.json({ success: false, raw: "Hết lượt làm rõ tài liệu hôm nay." }, { status: 429 });
 
   const { imageBase64, mimeType } = await req.json();
   if (!imageBase64) return new Response("No image", { status: 400 });
