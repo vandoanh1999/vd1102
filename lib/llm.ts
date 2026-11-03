@@ -8,17 +8,68 @@ export const groq = new OpenAI({
   maxRetries: 1,
 });
 
-/** Model chính viết tiếng Việt tốt; model dự phòng nhanh, rẻ khi model chính quá tải. */
-export const CHAT_MODELS = [
-  process.env.CHAT_MODEL || "llama-3.3-70b-versatile",
-  process.env.CHAT_MODEL_FALLBACK || "llama-3.1-8b-instant",
+/**
+ * Thứ tự ưu tiên model chat (giỏi tiếng Việt, theo lệnh tốt trước).
+ * Danh sách model mỗi tài khoản Groq dùng được có thể khác nhau và thay đổi theo thời gian,
+ * nên app hỏi Groq danh sách thật rồi mới chọn — không đoán cứng.
+ */
+const CHAT_PREFERENCE = [
+  "llama-3.3-70b-versatile",
+  "openai/gpt-oss-120b",
+  "moonshotai/kimi-k2-instruct-0905",
+  "moonshotai/kimi-k2-instruct",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3-32b",
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "openai/gpt-oss-20b",
+  "llama-3.1-8b-instant",
 ];
+const STT_PREFERENCE = ["whisper-large-v3-turbo", "whisper-large-v3"];
+
+const NOT_CHAT = /whisper|tts|guard|prompt-guard|playai|orpheus|distil|compound|safeguard/i;
+
+let cache: { at: number; ids: string[] } | null = null;
+const TTL = 10 * 60_000;
+
+/** Danh sách model tài khoản dùng được (lưu tạm 10 phút). */
+export async function availableModels(force = false): Promise<string[]> {
+  if (!force && cache && Date.now() - cache.at < TTL) return cache.ids;
+  const res = await groq.models.list();
+  const ids = res.data.filter(m => (m as { active?: boolean }).active !== false).map(m => m.id);
+  cache = { at: Date.now(), ids };
+  return ids;
+}
+
+/** Model chat theo thứ tự thử: ưu tiên biến môi trường, rồi danh sách ưu tiên, rồi bất kỳ model chat nào còn lại. */
+export async function chatModels(): Promise<string[]> {
+  let ids: string[] = [];
+  try { ids = await availableModels(); } catch { /* không lấy được danh sách → dùng danh sách ưu tiên */ }
+  const wanted = [process.env.CHAT_MODEL, ...CHAT_PREFERENCE].filter(Boolean) as string[];
+  if (!ids.length) return wanted.slice(0, 3);
+  const picked = wanted.filter(id => ids.includes(id));
+  const others = ids.filter(id => !NOT_CHAT.test(id) && !picked.includes(id));
+  return [...new Set([...picked, ...others])].slice(0, 3);
+}
+
+export async function sttModel(): Promise<string> {
+  try {
+    const ids = await availableModels();
+    return [process.env.STT_MODEL, ...STT_PREFERENCE].find(id => id && ids.includes(id))
+      || ids.find(id => /whisper/i.test(id)) || STT_PREFERENCE[0];
+  } catch {
+    return process.env.STT_MODEL || STT_PREFERENCE[0];
+  }
+}
+
+/** Model báo 404 (bị gỡ / không có quyền) → bỏ bộ nhớ tạm để lần sau hỏi lại danh sách. */
+export function forgetModels() { cache = null; }
 
 /** Đổi lỗi kỹ thuật thành câu dễ hiểu cho người dùng (không lộ chi tiết nhạy cảm). */
 export function friendlyAIError(e: unknown): string {
   const status = (e as { status?: number })?.status;
   if (status === 401 || status === 403)
     return "Não AI đang bị khoá (chìa khoá GROQ_API_KEY sai hoặc hết hạn). Báo admin thay chìa khoá giùm.";
+  if (status === 404) return "Groq vừa đổi danh sách model, VNAI đang dò lại. Gửi lại câu hỏi thử xem.";
   if (status === 429) return "AI đang bị hỏi dồn quá, thở không kịp. Đợi vài giây rồi hỏi lại.";
   if (status && status >= 500) return "Máy chủ AI đang trục trặc. Thử lại sau ít phút.";
   return "Có lỗi khi gọi AI. Thử lại sau nhé.";

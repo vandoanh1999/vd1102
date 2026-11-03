@@ -1,4 +1,4 @@
-import { groq, CHAT_MODELS, friendlyAIError } from "@/lib/llm";
+import { groq, chatModels, forgetModels, friendlyAIError } from "@/lib/llm";
 import { LEVELS, isLevel, systemPrompt, detectCrisis, type Level } from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
     let answer = "";
     let lastError: unknown;
     try {
-      for (const model of CHAT_MODELS) {
+      for (const model of await chatModels()) {
         try {
           const completion = await groq.chat.completions.create({
             model,
@@ -86,7 +86,9 @@ export async function POST(req: Request) {
           break;
         } catch (e) {
           lastError = e;
-          console.error(`[chat] model ${model} failed:`, (e as { status?: number })?.status, String(e));
+          const status = (e as { status?: number })?.status;
+          console.error(`[chat] model ${model} failed:`, status, String(e));
+          if (status === 404) forgetModels();
           if (answer) break; // đã stream được một phần thì không đổi model giữa chừng
         }
       }

@@ -1,12 +1,11 @@
 import { toFile } from "openai";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
-import { groq, friendlyAIError } from "@/lib/llm";
+import { groq, sttModel, friendlyAIError } from "@/lib/llm";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 const MAX_BYTES = 8 * 1024 * 1024; // ~ vài phút ghi âm nén
-const STT_MODEL = process.env.STT_MODEL || "whisper-large-v3-turbo";
 
 /**
  * Whisper hay "bịa" câu quen thuộc khi đoạn ghi âm toàn tiếng ồn/im lặng
@@ -41,7 +40,7 @@ export async function POST(req: Request) {
     const file = await toFile(Buffer.from(await audio.arrayBuffer()), name, { type: audio.type || "audio/webm" });
     const result = await groq.audio.transcriptions.create({
       file,
-      model: STT_MODEL,
+      model: await sttModel(),
       language: "vi",
       temperature: 0,
       // Gợi ý ngữ cảnh giúp Whisper viết đúng dấu và từ lóng tiếng Việt.
