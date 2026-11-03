@@ -26,7 +26,7 @@ const CHAT_PREFERENCE = [
 ];
 const STT_PREFERENCE = ["whisper-large-v3-turbo", "whisper-large-v3"];
 
-const NOT_CHAT = /whisper|tts|guard|prompt-guard|playai|orpheus|distil|compound|safeguard/i;
+const NOT_CHAT = /whisper|tts|guard|prompt-guard|playai|orpheus|distil|compound|safeguard|allam/i;
 
 let cache: { at: number; ids: string[] } | null = null;
 const TTL = 10 * 60_000;
@@ -111,6 +111,8 @@ export function forgetModels() { cache = null; }
 /** Đổi lỗi kỹ thuật thành câu dễ hiểu cho người dùng (không lộ chi tiết nhạy cảm). */
 export function friendlyAIError(e: unknown): string {
   const status = (e as { status?: number })?.status;
+  if (status === 403 && /blocked at the project level/i.test(String(e)))
+    return "Model AI đang bị chặn trong cài đặt dự án Groq. Admin vào console.groq.com → Settings → Project → Limits để bật model.";
   if (status === 401 || status === 403)
     return "Não AI đang bị khoá (chìa khoá GROQ_API_KEY sai hoặc hết hạn). Báo admin thay chìa khoá giùm.";
   if (status === 404) return "Groq vừa đổi danh sách model, VNAI đang dò lại. Gửi lại câu hỏi thử xem.";
