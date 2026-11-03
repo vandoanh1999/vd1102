@@ -61,6 +61,50 @@ export async function sttModel(): Promise<string> {
   }
 }
 
+/**
+ * Tham số riêng theo loại model:
+ *  - gpt-oss là model "suy nghĩ trước khi nói": để mức nghĩ thấp cho nhanh (phần nghĩ không lẫn vào câu trả lời).
+ *  - qwen3 có thể chèn <think>…</think> vào câu trả lời: yêu cầu giấu đi.
+ */
+export function modelParams(model: string): Record<string, unknown> {
+  if (model.startsWith("openai/gpt-oss")) return { reasoning_effort: "low" };
+  if (/qwen3/i.test(model)) return { reasoning_format: "hidden" };
+  return {};
+}
+
+/** Lọc phòng hờ đoạn <think>…</think> nếu model vẫn trả về trong luồng chữ. */
+export function thinkFilter() {
+  let inThink = false;
+  let pending = "";
+  /** Gọi khi luồng kết thúc: trả nốt phần chữ còn giữ lại (nếu không nằm trong <think>). */
+  const end = (): string => { const rest = inThink ? "" : pending; pending = ""; return rest; };
+  const push = (chunk: string): string => {
+    pending += chunk;
+    let out = "";
+    for (;;) {
+      if (inThink) {
+        const end = pending.indexOf("</think>");
+        if (end < 0) { pending = pending.slice(-8); return out; }
+        pending = pending.slice(end + 8);
+        inThink = false;
+      } else {
+        const start = pending.indexOf("<think>");
+        if (start < 0) {
+          // giữ lại đuôi có thể là đầu thẻ "<think" bị cắt giữa hai gói
+          const keep = pending.lastIndexOf("<");
+          if (keep >= 0 && pending.length - keep < 7) { out += pending.slice(0, keep); pending = pending.slice(keep); }
+          else { out += pending; pending = ""; }
+          return out;
+        }
+        out += pending.slice(0, start);
+        pending = pending.slice(start + 7);
+        inThink = true;
+      }
+    }
+  };
+  return { push, end };
+}
+
 /** Model báo 404 (bị gỡ / không có quyền) → bỏ bộ nhớ tạm để lần sau hỏi lại danh sách. */
 export function forgetModels() { cache = null; }
 

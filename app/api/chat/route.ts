@@ -1,4 +1,4 @@
-import { groq, chatModels, forgetModels, friendlyAIError } from "@/lib/llm";
+import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
 import { LEVELS, isLevel, systemPrompt, detectCrisis, type Level } from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
@@ -75,13 +75,17 @@ export async function POST(req: Request) {
             model,
             stream: true,
             temperature: crisis ? 0.5 : LEVELS[level].temperature,
-            max_tokens: 1_500,
+            max_tokens: 2_000,
             messages,
-          });
+            ...modelParams(model),
+          } as Parameters<typeof groq.chat.completions.create>[0] & { stream: true });
+          const clean = thinkFilter();
           for await (const chunk of completion) {
-            const token = chunk.choices?.[0]?.delta?.content || "";
+            const token = clean.push(chunk.choices?.[0]?.delta?.content || "");
             if (token) { answer += token; send({ type: "token", token }); }
           }
+          const tail = clean.end();
+          if (tail) { answer += tail; send({ type: "token", token: tail }); }
           lastError = undefined;
           break;
         } catch (e) {
