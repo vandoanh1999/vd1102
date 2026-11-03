@@ -68,5 +68,4 @@ export const LIMITS = {
   chatPerClient: num(process.env.LIMIT_CHAT_PER_DAY, 40),
   chatGlobal: num(process.env.LIMIT_CHAT_GLOBAL_PER_DAY, 5_000),
   sttPerClient: num(process.env.LIMIT_STT_PER_DAY, 60),
-  enhancePerClient: num(process.env.LIMIT_ENHANCE_PER_DAY, 10),
 };

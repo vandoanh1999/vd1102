@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-"build": "prisma generate && next build --webpack",
+    "build": "prisma generate && next build --webpack",
     "start": "next start",
     "postinstall": "prisma generate",
     "prisma:push": "prisma db push"
@@ -22,7 +22,8 @@
     "react-markdown": "9.0.1",
     "rehype-highlight": "7.0.1",
     "remark-gfm": "4.0.0",
-    "stripe": "16.9.0"
+    "stripe": "16.9.0",
+    "three": "^0.169.0"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.15",
@@ -30,6 +31,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/three": "^0.169.0",
     "autoprefixer": "10.4.20",
     "postcss": "8.4.47",
     "prisma": "5.19.1",

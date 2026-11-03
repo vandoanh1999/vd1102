@@ -1,19 +1,34 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
-import MatrixCanvas from "@/components/MatrixCanvas";
+import Sidebar from "@/components/Sidebar";
+import type { Activity, Mood } from "@/components/MoodFace";
 import { LEVELS, type Level } from "@/lib/persona";
 import { shareRoast } from "@/lib/shareCard";
-import { loadConvs, getConv, saveConv, deleteConv, newConvId, CHANGED_EVENT, type LocalConv, type StoredMessage } from "@/lib/localConvs";
+import { getConv, saveConv, newConvId, type StoredMessage } from "@/lib/localConvs";
 import {
   VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
 } from "@/lib/voice";
 
+// Gương mặt 3D chỉ chạy trên trình duyệt (WebGL), tải riêng để trang hiện nhanh.
+const MoodFace = dynamic(() => import("@/components/MoodFace"), { ssr: false });
+
 type Phase = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 
 const NO_VI_VOICE =
-  "Máy bạn chưa có giọng đọc tiếng Việt nên AI sẽ đọc lơ lớ. Android: vào Cài đặt → Chuyển văn bản sang lời nói → " +
-  "chọn công cụ của Google → tải giọng Tiếng Việt. iPhone: Cài đặt → Trợ năng → Nội dung được đọc → Giọng nói → Tiếng Việt.";
+  "Máy bạn chưa có giọng đọc tiếng Việt nên AI sẽ đọc lơ lớ. Android: Cài đặt → Chuyển văn bản sang lời nói → " +
+  "công cụ của Google → tải giọng Tiếng Việt. iPhone: Cài đặt → Trợ năng → Nội dung được đọc → Giọng nói → Tiếng Việt.";
+
+/** Màu nền theo tâm trạng — khớp với nền của gương mặt 3D. */
+const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "#0d0707", care: "#1b1f24" };
+const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
+
+const GREETING: Record<Level, { title: string; sub: string }> = {
+  hien: { title: "Chào bạn, hôm nay muốn hỏi gì nào?", sub: "Hỏi gì mình cũng trả lời, có trêu nhẹ một chút thôi." },
+  khia: { title: "Lại định hỏi gì đây?", sub: "Trả lời đúng hết. Hỏi ngu thì ráng chịu." },
+  gat: { title: "Hỏi lẹ đi, tao bận.", sub: "Biết tuốt, mồm thối. Đủ 18 tuổi mới được vào đây." },
+};
 
 const SUGGESTIONS = [
   "1 + 1 bằng mấy?",
@@ -21,6 +36,7 @@ const SUGGESTIONS = [
   "Viết code Python in ra Hello World",
   "Làm sao để giàu nhanh?",
   "Giải thích blockchain cho tôi",
+  "Tại sao bầu trời màu xanh?",
 ];
 
 // localStorage có thể bị chặn (ẩn danh) → luôn bọc try/catch.
@@ -32,12 +48,10 @@ const store = {
 export default function ChatBox() {
   // Dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
   const convRef = useRef<string>("");
-  const adultRef = useRef(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
-  const [history, setHistory] = useState<LocalConv[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
+
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [level, setLevel] = useState<Level>("khia");
@@ -45,8 +59,10 @@ export default function ChatBox() {
   const [askAdult, setAskAdult] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [sharingIdx, setSharingIdx] = useState<number | null>(null);
-  const [showMenu, setShowMenu] = useState(false);
-  const [mode, setMode] = useState<"chat" | "enhance">("chat");
+  const [drawer, setDrawer] = useState(false);
+  const [levelMenu, setLevelMenu] = useState(false);
+  const [copied, setCopied] = useState<number | null>(null);
+
   // giọng nói
   const [phase, setPhase] = useState<Phase>("idle");
   const [micLevel, setMicLevel] = useState(0);
@@ -57,20 +73,17 @@ export default function ChatBox() {
   const callRef = useRef(false);
   const speakOnRef = useRef(false);
   const levelRef = useRef<Level>("khia");
+  const adultRef = useRef(false);
   useEffect(() => { speakOnRef.current = speakOn; }, [speakOn]);
   useEffect(() => { levelRef.current = level; }, [level]);
   useEffect(() => { adultRef.current = adult; }, [adult]);
-  // enhance state
-  const [enhanceImg, setEnhanceImg] = useState<string | null>(null);
-  const [enhanceMime, setEnhanceMime] = useState("image/jpeg");
-  const [enhancing, setEnhancing] = useState(false);
-  const [enhanceData, setEnhanceData] = useState<any>(null);
-  const [enhanceError, setEnhanceError] = useState("");
-  const resultRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
 
-  // Nhớ cấp độ và xác nhận 18+ của người dùng trên máy này.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const levelMenuRef = useRef<HTMLDivElement>(null);
+
+  // Nhớ cấp độ, xác nhận 18+ và "Đọc to" của người dùng trên máy này.
   useEffect(() => {
     const isAdult = store.get("vnai.adult") === "1";
     setAdult(isAdult);
@@ -87,37 +100,38 @@ export default function ChatBox() {
     const c = id ? getConv(id) : undefined;
     convRef.current = c ? c.id : newConvId();
     setMessages(c ? c.messages : []);
-    setShowHistory(false);
+    setDrawer(false);
   }, []);
 
   // Mỗi lần mở trang là một cuộc mới; 5 cuộc gần nhất vẫn nằm trong Lịch sử trên máy này.
   useEffect(() => {
     openConversation(null);
-    const refresh = () => setHistory(loadConvs());
-    refresh();
     const onOpen = (e: Event) => openConversation((e as CustomEvent<string | null>).detail);
     window.addEventListener("vnai:open", onOpen);
-    window.addEventListener(CHANGED_EVENT, refresh);
-    window.addEventListener("storage", refresh); // đồng bộ khi mở nhiều tab
-    return () => {
-      window.removeEventListener("vnai:open", onOpen);
-      window.removeEventListener(CHANGED_EVENT, refresh);
-      window.removeEventListener("storage", refresh);
-    };
+    return () => window.removeEventListener("vnai:open", onOpen);
   }, [openConversation]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
 
-  // close menu on outside click
+  // Đóng menu chọn mức độ khi bấm ra ngoài
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowMenu(false);
+      if (levelMenuRef.current && !levelMenuRef.current.contains(e.target as Node)) setLevelMenu(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  // Ô nhập tự giãn theo nội dung
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 200) + "px";
+  }, [input]);
+
   const pickLevel = (l: Level) => {
+    setLevelMenu(false);
     if (LEVELS[l].adult && !adult) { setAskAdult(true); return; }
     setLevel(l); store.set("vnai.level", l);
   };
@@ -128,7 +142,7 @@ export default function ChatBox() {
     setAskAdult(false);
   };
 
-  const newConversation = () => openConversation(null);
+  const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
 
   /** Gửi câu hỏi, stream câu trả lời lên màn hình; trả về toàn văn câu trả lời ("" nếu lỗi). */
   const send = async (text?: string): Promise<string> => {
@@ -138,15 +152,13 @@ export default function ChatBox() {
     let ai = "";
     let ok = false;
     let crisis = false;
-    // Lịch sử của cuộc hiện tại (chỉ câu hỏi/trả lời, bỏ thông báo lỗi) gửi kèm để AI nhớ ngữ cảnh.
+    // Lịch sử cuộc hiện tại (chỉ câu hỏi/trả lời) gửi kèm để AI nhớ ngữ cảnh.
     const past: StoredMessage[] = messagesRef.current
       .filter((m): m is StoredMessage => m.role === "user" || m.role === "assistant")
       .map(m => ({ role: m.role, content: m.content, ...(m.crisis ? { crisis: true } : {}) }));
     const convId = convRef.current;
     setMessages(prev => [...prev, { role: "user", content: prompt }]);
     setInput("");
-
-    const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
 
     try {
       const res = await fetch("/api/chat", {
@@ -195,7 +207,7 @@ export default function ChatBox() {
             ok = true;
             crisis = !!payload.crisis;
             if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
-            if (payload.crisis) setMessages(prev => {
+            if (crisis) setMessages(prev => {
               const cp = [...prev]; const last = cp[cp.length - 1];
               if (last?.role === "assistant") cp[cp.length - 1] = { ...last, crisis: true };
               return cp;
@@ -220,8 +232,6 @@ export default function ChatBox() {
   };
 
   /* ───────────── Giọng nói ───────────── */
-
-  const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
 
   const speakAnswer = async (text: string) => {
     setPhase("speaking");
@@ -317,331 +327,221 @@ export default function ChatBox() {
     if (!answer || !question) return;
     setSharingIdx(i);
     try { await shareRoast(question.content, answer.content); }
-    catch { setMessages(prev => [...prev, { role: "error", content: "Không tạo được ảnh. Thử lại nhé." }]); }
+    catch { fail("Không tạo được ảnh. Thử lại nhé."); }
     finally { setSharingIdx(null); }
   };
 
-  const handleEnhanceFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if (!file) return;
-    setEnhanceMime(file.type);
-    const reader = new FileReader();
-    reader.onload = () => { setEnhanceImg((reader.result as string).split(",")[1]); setEnhanceData(null); };
-    reader.readAsDataURL(file);
+  const copy = async (i: number) => {
+    try { await navigator.clipboard.writeText(messages[i].content); setCopied(i); setTimeout(() => setCopied(null), 1500); }
+    catch { /* trình duyệt chặn clipboard */ }
   };
 
-  const runEnhance = async () => {
-    if (!enhanceImg) return;
-    setEnhancing(true); setEnhanceError("");
-    try {
-      const r = await fetch("/api/enhance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: enhanceImg, mimeType: enhanceMime }),
-      });
-      const json = await r.json();
-      if (json.success) setEnhanceData(json.data);
-      else setEnhanceError("Không đọc được: " + (json.raw?.slice(0, 80) || "lỗi"));
-    } catch { setEnhanceError("Lỗi kết nối"); }
-    setEnhancing(false);
-  };
+  /* ───────────── Gương mặt: tâm trạng + hành động ───────────── */
 
-  const downloadPNG = async () => {
-    const { default: html2canvas } = await import("html2canvas");
-    const canvas = await html2canvas(resultRef.current!, { scale: 2, backgroundColor: "#fff" });
-    const a = document.createElement("a"); a.download = "tailieu.png";
-    a.href = canvas.toDataURL("image/png"); a.click();
-  };
-
-  const downloadPDF = async () => {
-    const { default: html2canvas } = await import("html2canvas");
-    const { jsPDF } = await import("jspdf");
-    const canvas = await html2canvas(resultRef.current!, { scale: 2, backgroundColor: "#fff" });
-    const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const w = pdf.internal.pageSize.getWidth();
-    pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, w, (canvas.height * w) / canvas.width);
-    pdf.save("tailieu.pdf");
-  };
+  const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
+  const mood: Mood = lastAssistant?.crisis ? "care" : level;
+  const streaming = thinking && messages[messages.length - 1]?.role === "assistant";
+  const activity: Activity =
+    phase === "listening" ? "listening"
+      : phase === "speaking" || streaming ? "speaking"
+        : phase === "transcribing" || phase === "thinking" || thinking ? "thinking"
+          : "idle";
+  const empty = messages.length === 0;
+  const bg = MOOD_BG[mood];
+  const accent = MOOD_ACCENT[mood];
+  const greet = GREETING[level];
+  const hasText = !!input.trim();
 
   return (
-    <div className="space-y-3">
-      <div className="border-b border-cyan-500/20 pb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-3 min-w-0">
-          <button onClick={() => setMode("chat")}
-            className={`text-sm font-medium whitespace-nowrap ${mode === "chat" ? "text-rose-300 border-b border-rose-300" : "text-gray-500"}`}>
-            🤬 VNAI mỏ hỗn
+    <div className="relative h-dvh flex overflow-hidden text-[#ece8e1] transition-colors duration-700"
+      style={{ background: bg, ["--accent" as any]: accent }}>
+      <Sidebar open={drawer} onClose={() => setDrawer(false)} currentId={convRef.current} />
+
+      <main className="relative flex-1 min-w-0 flex flex-col">
+        {/* Gương mặt 3D phía sau */}
+        <div className="absolute inset-0 z-0 pointer-events-none">
+          <MoodFace mood={mood} activity={activity} level={micLevel} prominent={empty || callMode} />
+        </div>
+        {/* Lớp mờ để chữ dễ đọc khi đang trò chuyện */}
+        <div className="absolute inset-0 z-0 pointer-events-none transition-opacity duration-700"
+          style={{
+            opacity: empty || callMode ? 0 : 1,
+            background: `linear-gradient(to bottom, ${bg}99 0%, ${bg}d9 40%, ${bg}f2 100%)`,
+          }} />
+
+        {/* Thanh trên */}
+        <header className="relative z-10 h-14 shrink-0 flex items-center gap-2 px-3">
+          <button onClick={() => setDrawer(true)} className="md:hidden w-9 h-9 grid place-items-center rounded-lg hover:bg-white/5" aria-label="Mở lịch sử">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
           </button>
-          {mode === "chat" && messages.length > 0 && (
-            <button onClick={newConversation} className="text-xs text-gray-400 hover:text-cyan-300 whitespace-nowrap">
-              ＋ Cuộc mới
+          <div className="md:hidden font-semibold tracking-tight">VNAI</div>
+          <div className="flex-1" />
+          {!empty && (
+            <button onClick={() => openConversation(null)} title="Cuộc mới"
+              className="w-9 h-9 grid place-items-center rounded-lg hover:bg-white/5" aria-label="Cuộc mới">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
             </button>
           )}
-          {mode === "chat" && history.length > 0 && (
-            <button onClick={() => setShowHistory(v => !v)}
-              className="md:hidden text-xs text-gray-400 hover:text-cyan-300 whitespace-nowrap">
-              🕘 Lịch sử ({history.length})
-            </button>
-          )}
-          {mode === "enhance" && (
-            <button onClick={() => setMode("enhance")}
-              className="text-sm font-medium text-cyan-300 border-b border-cyan-300">
-              ✨ Làm rõ tài liệu
-            </button>
-          )}
-        </div>
-        <div className="hidden sm:block"><MatrixCanvas /></div>
-      </div>
+        </header>
 
-      {/* Lịch sử trên điện thoại (máy tính có cột bên trái) */}
-      {mode === "chat" && showHistory && (
-        <div className="md:hidden rounded-lg border border-cyan-500/20 bg-gray-900/90 p-2 space-y-1">
-          <div className="text-[11px] text-gray-500 px-1">5 cuộc gần nhất, chỉ lưu trên máy này</div>
-          {history.map(c => (
-            <div key={c.id} className="flex items-center gap-1">
-              <button onClick={() => openConversation(c.id)}
-                className={`flex-1 min-w-0 text-left text-sm truncate px-2 py-1.5 rounded border ${c.id === convRef.current
-                  ? "border-rose-400/60 bg-rose-500/10" : "border-cyan-500/20 bg-gray-800/70"}`}>
-                {c.title}
-              </button>
-              <button onClick={() => { deleteConv(c.id); if (c.id === convRef.current) openConversation(null); }}
-                className="shrink-0 px-2 text-gray-500 hover:text-red-400" title="Xoá">✕</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* CHAT MODE */}
-      {mode === "chat" && (
-        <>
-          <div className="h-[58dvh] overflow-y-auto space-y-3 pr-1">
-            {messages.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-center gap-4 px-2">
-                <div className="text-5xl">🤬</div>
-                <div className="text-lg font-semibold text-rose-200">AI giả đần, mồm láo, nhưng biết tuốt.</div>
-                <div className="text-sm text-gray-400 max-w-md">
-                  Hỏi gì cũng trả lời đúng. Hỏi ngu thì ăn chửi. Chọn mức độ bên dưới rồi hỏi thử đi, đừng sợ.
-                </div>
-                <div className="flex flex-wrap justify-center gap-2 max-w-lg">
-                  {SUGGESTIONS.map(s => (
-                    <button key={s} onClick={() => sendTyped(s)} disabled={thinking || callMode}
-                      className="text-xs px-3 py-1.5 rounded-full border border-cyan-500/30 text-cyan-200 hover:bg-cyan-500/10">
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {messages.map((m, i) => (
-              <MessageBubble key={i} m={m}
-                onShare={m.role === "assistant" ? () => share(i) : undefined}
-                onSpeak={m.role === "assistant" ? () => { unlockSpeech(); speakAnswer(m.content); } : undefined}
-                sharing={sharingIdx === i} />
-            ))}
-            {thinking && messages[messages.length - 1]?.role === "user" && (
-              <div className="text-xs text-gray-400 animate-pulse">VNAI đang nghĩ câu chửi...</div>
-            )}
-            <div ref={bottomRef} />
-          </div>
-
-          {/* Chọn mức độ chửi */}
-          <div className="flex items-center gap-2 flex-wrap">
-            {(Object.keys(LEVELS) as Level[]).map(l => (
-              <button key={l} onClick={() => pickLevel(l)}
-                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${level === l
-                  ? "border-rose-400 bg-rose-500/20 text-rose-100"
-                  : "border-gray-600 text-gray-400 hover:border-gray-400"}`}>
-                {LEVELS[l].emoji} {LEVELS[l].label}{LEVELS[l].adult ? " 18+" : ""}
-              </button>
-            ))}
-            <button onClick={toggleSpeak}
-              className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${speakOn
-                ? "border-cyan-400 bg-cyan-500/20 text-cyan-100"
-                : "border-gray-600 text-gray-400 hover:border-gray-400"}`}>
-              {speakOn ? "🔊 Đọc to" : "🔇 Đọc to"}
-            </button>
-            {remaining !== null && (
-              <span className="text-xs text-gray-500 ml-auto">Còn {remaining} câu hôm nay</span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {/* + menu */}
-            <div ref={menuRef} className="relative shrink-0">
-              <button onClick={() => setShowMenu(v => !v)}
-                className="w-9 h-9 rounded-full border border-cyan-500/40 flex items-center justify-center text-cyan-400 hover:bg-cyan-500/10 text-xl font-light">
-                +
-              </button>
-              {showMenu && (
-                <div className="absolute bottom-12 left-0 bg-gray-800 border border-cyan-500/30 rounded-lg shadow-xl w-52 z-50 overflow-hidden">
-                  <button onClick={() => { setMode("enhance"); setShowMenu(false); }}
-                    className="w-full px-4 py-3 text-left text-sm hover:bg-cyan-500/10 flex items-center gap-2">
-                    <span>✨</span> Làm rõ tài liệu
+        {/* Nội dung */}
+        <div ref={scrollRef} className="relative z-10 flex-1 overflow-y-auto">
+          {empty ? (
+            <div className="h-full flex flex-col items-center justify-end pb-6 px-4 text-center">
+              <h1 className="font-serif text-[28px] sm:text-4xl leading-tight mb-2" style={{ textShadow: "0 2px 18px rgba(0,0,0,.6)" }}>
+                {greet.title}
+              </h1>
+              <p className="text-sm text-[#a39e96] mb-5">{greet.sub}</p>
+              <div className="flex flex-wrap justify-center gap-2 max-w-xl">
+                {SUGGESTIONS.map((s, i) => (
+                  <button key={s} onClick={() => sendTyped(s)} disabled={thinking}
+                    className={`${i >= 3 ? "hidden sm:inline-block" : ""} text-[13px] px-3.5 py-2 rounded-xl border border-white/10 bg-black/30 backdrop-blur hover:bg-white/10 transition-colors`}>
+                    {s}
                   </button>
-                  <div className="px-4 py-2 text-xs text-gray-500 border-t border-gray-700">Thêm tính năng sắp ra mắt...</div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="max-w-3xl mx-auto px-4 py-4 space-y-6">
+              {messages.map((m, i) => (
+                <MessageBubble key={i} m={m}
+                  onShare={m.role === "assistant" ? () => share(i) : undefined}
+                  onSpeak={m.role === "assistant" ? () => { unlockSpeech(); speakAnswer(m.content); } : undefined}
+                  onCopy={m.role === "assistant" ? () => copy(i) : undefined}
+                  copied={copied === i}
+                  sharing={sharingIdx === i}
+                  streaming={streaming && i === messages.length - 1} />
+              ))}
+              {thinking && messages[messages.length - 1]?.role === "user" && (
+                <div className="flex items-center gap-3 text-sm text-[#a39e96]">
+                  <span className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: accent }} />
+                  {level === "gat" ? "Đang nghĩ cách chửi mày..." : level === "khia" ? "Đang nghĩ câu khịa..." : "Đang nghĩ..."}
                 </div>
               )}
+              <div ref={bottomRef} />
             </div>
+          )}
+        </div>
 
-            <input value={input} onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendTyped()}
-              className="flex-1 min-w-0 bg-gray-800 border border-cyan-500/30 rounded px-3 py-2 text-sm focus:outline-none focus:border-rose-400"
-              placeholder={phase === "listening" ? "Đang nghe..." : phase === "transcribing" ? "Đang chép lời..." : "Hỏi đi, tao đang chờ..."}
-              disabled={thinking || phase !== "idle"} maxLength={4000} />
-            {canVoice && !input.trim() ? (
-              <>
-                <button onClick={micTap} disabled={thinking || callMode || (phase !== "idle" && phase !== "listening")}
-                  title="Bấm để nói (tự dừng khi bạn im lặng)"
-                  className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg disabled:opacity-50 ${phase === "listening" && !callMode
-                    ? "bg-rose-600 animate-pulse" : "bg-gray-800 border border-rose-400/50"}`}
-                  style={phase === "listening" && !callMode ? { boxShadow: `0 0 0 ${4 + micLevel * 14}px rgba(244,63,94,0.25)` } : undefined}>
-                  {phase === "transcribing" && !callMode ? "…" : "🎙️"}
+        {/* Khung soạn tin */}
+        <div className="relative z-10 shrink-0 px-3 pb-3 pt-1">
+          <div className="max-w-3xl mx-auto">
+            <div className="rounded-3xl border border-white/10 bg-[#2b2926]/90 backdrop-blur-md shadow-[0_8px_30px_rgba(0,0,0,.35)] focus-within:border-white/20 transition-colors">
+              <textarea ref={inputRef} value={input} rows={1}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (hasText) sendTyped(); }
+                }}
+                placeholder={phase === "listening" ? "Đang nghe..." : phase === "transcribing" ? "Đang chép lời..." : "Hỏi VNAI bất cứ điều gì..."}
+                disabled={thinking || phase !== "idle"} maxLength={4000}
+                className="w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 placeholder:text-[#8a857d] focus:outline-none disabled:opacity-60" />
+              <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+                {/* Chọn mức độ chửi */}
+                <div ref={levelMenuRef} className="relative">
+                  <button onClick={() => setLevelMenu(v => !v)}
+                    className="h-8 px-3 rounded-full text-[13px] flex items-center gap-1.5 border border-white/10 hover:bg-white/5">
+                    <span>{LEVELS[level].emoji}</span><span>{LEVELS[level].label}</span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
+                  {levelMenu && (
+                    <div className="absolute bottom-10 left-0 w-60 rounded-2xl border border-white/10 bg-[#2b2926] shadow-2xl p-1.5 z-30">
+                      {(Object.keys(LEVELS) as Level[]).map(l => (
+                        <button key={l} onClick={() => pickLevel(l)}
+                          className={`w-full text-left px-3 py-2 rounded-xl flex items-start gap-3 hover:bg-white/5 ${level === l ? "bg-white/5" : ""}`}>
+                          <span className="text-lg leading-6">{LEVELS[l].emoji}</span>
+                          <span className="flex-1">
+                            <span className="block text-sm">{LEVELS[l].label}{LEVELS[l].adult ? " · 18+" : ""}</span>
+                            <span className="block text-xs text-[#a39e96]">
+                              {l === "hien" ? "Trêu nhẹ, lịch sự" : l === "khia" ? "Mỉa mai, cay mà sang" : "Xưng mày tao, chửi gắt"}
+                            </span>
+                          </span>
+                          {level === l && <span className="text-sm" style={{ color: accent }}>✓</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <button onClick={toggleSpeak} title={speakOn ? "Tắt đọc to" : "Bật đọc to câu trả lời"}
+                  className={`w-8 h-8 grid place-items-center rounded-full border transition-colors ${speakOn ? "border-[var(--accent)] text-[var(--accent)]" : "border-white/10 text-[#a39e96] hover:bg-white/5"}`}>
+                  {speakOn
+                    ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 5 6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
+                    : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 5 6 9H2v6h4l5 4z" /><path d="m22 9-6 6M16 9l6 6" /></svg>}
                 </button>
-                <button onClick={startCall} disabled={thinking || callMode || phase !== "idle"} title="Gọi rảnh tay"
-                  className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-lg bg-gradient-to-r from-rose-500 to-fuchsia-600 disabled:opacity-50">
-                  📞
-                </button>
-              </>
-            ) : (
-              <button onClick={() => sendTyped()} disabled={thinking || !input.trim()}
-                className="shrink-0 px-4 py-2 bg-gradient-to-r from-rose-500 to-fuchsia-600 rounded disabled:opacity-50 text-sm font-medium">
-                {thinking ? "..." : "Gửi"}
-              </button>
-            )}
+
+                <div className="flex-1" />
+
+                {canVoice && (
+                  <button onClick={micTap} disabled={thinking || callMode || (phase !== "idle" && phase !== "listening")}
+                    title="Bấm để nói (tự dừng khi bạn im lặng)" aria-label="Nói"
+                    className={`w-9 h-9 grid place-items-center rounded-full transition-all disabled:opacity-40 ${phase === "listening" && !callMode ? "text-black" : "hover:bg-white/5"}`}
+                    style={phase === "listening" && !callMode ? { background: accent, boxShadow: `0 0 0 ${3 + micLevel * 12}px ${accent}40` } : undefined}>
+                    {phase === "transcribing" && !callMode
+                      ? <span className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                      : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>}
+                  </button>
+                )}
+
+                {hasText || !canVoice ? (
+                  <button onClick={() => sendTyped()} disabled={thinking || !hasText} aria-label="Gửi"
+                    className="w-9 h-9 grid place-items-center rounded-full text-black disabled:opacity-30 transition-opacity"
+                    style={{ background: accent }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+                  </button>
+                ) : (
+                  <button onClick={startCall} disabled={thinking || callMode || phase !== "idle"} title="Gọi rảnh tay" aria-label="Gọi"
+                    className="h-9 px-3 rounded-full flex items-center gap-1.5 text-black text-[13px] font-medium disabled:opacity-40"
+                    style={{ background: accent }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M2 12h2M6 8v8M10 5v14M14 8v8M18 10v4M22 12h0" /></svg>
+                    Gọi
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="text-[11px] text-[#8a857d] text-center mt-2">
+              VNAI chửi cho vui, không nhằm xúc phạm ai. Đang buồn thật thì cứ nói thật, nó sẽ thôi diễn.
+              {remaining !== null && <> · Còn {remaining} câu hôm nay</>}
+            </p>
           </div>
-          <p className="text-[11px] text-gray-500 text-center">
-            VNAI chửi cho vui, không nhằm xúc phạm ai. Đang buồn thật thì cứ nói thật, nó sẽ thôi diễn.
-          </p>
+        </div>
 
-          {/* Màn hình chế độ gọi */}
-          {callMode && (
-            <div className="fixed inset-0 z-40 bg-gray-950/95 flex flex-col items-center justify-between p-6">
-              <div className="text-center pt-6 space-y-1">
-                <div className="text-rose-300 font-semibold">📞 Đang gọi VNAI mỏ hỗn</div>
-                <div className="text-xs text-gray-400">{LEVELS[level].emoji} {LEVELS[level].label} · nói xong im 1 giây là nó tự trả lời</div>
+        {/* Chế độ gọi: mặt to giữa màn hình, chỉ còn trạng thái + nút */}
+        {callMode && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-end pb-10 gap-6" style={{ background: "transparent" }}>
+            <div className="text-center" style={{ textShadow: "0 2px 16px rgba(0,0,0,.8)" }}>
+              <div className="text-xl font-medium">
+                {activity === "listening" ? "Đang nghe..." : activity === "thinking" ? "Đang nghĩ câu chửi..." :
+                  activity === "speaking" ? "Đang chửi..." : "..."}
               </div>
-              <div className="flex flex-col items-center gap-6">
-                <div className="rounded-full bg-gradient-to-br from-rose-500 to-fuchsia-700 grid place-items-center text-6xl transition-transform duration-100"
-                  style={{ width: 160, height: 160, transform: `scale(${phase === "listening" ? 1 + micLevel * 0.35 : phase === "speaking" ? 1.08 : 1})` }}>
-                  {phase === "speaking" ? "🤬" : phase === "thinking" || phase === "transcribing" ? "🤔" : "👂"}
-                </div>
-                <div className="text-lg text-gray-200 h-7">
-                  {phase === "listening" ? "Đang nghe mày nói..." : phase === "transcribing" ? "Đang nghe lại..." :
-                    phase === "thinking" || thinking ? "Đang nghĩ câu chửi..." : phase === "speaking" ? "Đang chửi..." : "..."}
-                </div>
-                {messages.length > 0 && (
-                  <div className="max-w-md text-sm text-gray-400 text-center line-clamp-4 px-2">
-                    {messages[messages.length - 1].content}
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-3 pb-6">
-                {phase === "speaking" && (
-                  <button onClick={() => stopSpeaking()} className="px-5 py-3 rounded-full border border-gray-500 text-gray-200">
-                    ⏭ Ngắt lời
-                  </button>
-                )}
-                <button onClick={endCall} className="px-6 py-3 rounded-full bg-red-600 font-semibold">
-                  Kết thúc
+              <div className="text-xs text-[#a39e96] mt-1">{LEVELS[level].emoji} {LEVELS[level].label} · nói xong im 1 giây là nó tự trả lời</div>
+            </div>
+            <div className="flex gap-3">
+              {phase === "speaking" && (
+                <button onClick={() => stopSpeaking()} className="h-12 px-5 rounded-full border border-white/20 bg-black/40 backdrop-blur">
+                  Ngắt lời
                 </button>
-              </div>
+              )}
+              <button onClick={endCall} className="h-12 px-6 rounded-full bg-red-600 font-semibold">Kết thúc</button>
             </div>
-          )}
+          </div>
+        )}
+      </main>
 
-          {/* Hộp xác nhận 18+ */}
-          {askAdult && (
-            <div className="fixed inset-0 z-50 bg-black/70 grid place-items-center p-4">
-              <div className="w-full max-w-sm rounded-xl border border-rose-500/40 bg-gray-900 p-5 space-y-3">
-                <div className="text-lg font-semibold text-rose-200">🤬 Chế độ Mất dạy (18+)</div>
-                <p className="text-sm text-gray-300">
-                  AI sẽ xưng mày – tao và chửi rất gắt. Nó vẫn không đụng tới vùng miền, tôn giáo, giới tính,
-                  ngoại hình hay chuyện riêng tư của bạn.
-                </p>
-                <p className="text-sm text-gray-300">Bạn xác nhận đã đủ 18 tuổi và tự nguyện ăn chửi?</p>
-                <div className="flex gap-2 pt-1">
-                  <button onClick={confirmAdult}
-                    className="flex-1 py-2 rounded bg-gradient-to-r from-rose-500 to-fuchsia-600 text-sm font-medium">
-                    Tôi đủ 18, chửi đi
-                  </button>
-                  <button onClick={() => setAskAdult(false)}
-                    className="flex-1 py-2 rounded border border-gray-600 text-sm text-gray-300">
-                    Thôi, sợ rồi
-                  </button>
-                </div>
-              </div>
+      {/* Hộp xác nhận 18+ */}
+      {askAdult && (
+        <div className="fixed inset-0 z-50 bg-black/70 grid place-items-center p-4">
+          <div className="w-full max-w-sm rounded-3xl border border-red-500/30 bg-[#1a1514] p-6 space-y-3">
+            <div className="text-lg font-semibold text-red-300">🤬 Chế độ Mất dạy (18+)</div>
+            <p className="text-sm text-[#cfc9c0]">
+              AI sẽ xưng mày – tao và chửi rất gắt. Nó vẫn không đụng tới vùng miền, tôn giáo, giới tính,
+              ngoại hình hay chuyện riêng tư của bạn.
+            </p>
+            <p className="text-sm text-[#cfc9c0]">Bạn xác nhận đã đủ 18 tuổi và tự nguyện ăn chửi?</p>
+            <div className="flex gap-2 pt-1">
+              <button onClick={confirmAdult} className="flex-1 h-11 rounded-full bg-red-600 text-sm font-medium">Tôi đủ 18, chửi đi</button>
+              <button onClick={() => setAskAdult(false)} className="flex-1 h-11 rounded-full border border-white/15 text-sm">Thôi, sợ rồi</button>
             </div>
-          )}
-        </>
-      )}
-
-      {/* ENHANCE MODE */}
-      {mode === "enhance" && (
-        <div className="space-y-3">
-          <button onClick={() => { setMode("chat"); setEnhanceImg(null); setEnhanceData(null); }}
-            className="text-xs text-gray-400 hover:text-cyan-300">← Quay lại chat</button>
-
-          <label className="block w-full border-2 border-dashed border-cyan-500/40 rounded-lg p-5 text-center cursor-pointer hover:border-cyan-400">
-            <input type="file" accept="image/*" onChange={handleEnhanceFile} className="hidden" />
-            {enhanceImg
-              ? <span className="text-green-400 text-sm">✅ Ảnh đã chọn</span>
-              : <span className="text-gray-400 text-sm">📷 Chọn ảnh tài liệu cần làm rõ</span>}
-          </label>
-
-          {enhanceImg && (
-            <img src={`data:${enhanceMime};base64,${enhanceImg}`} className="w-full rounded opacity-60 max-h-48 object-contain" alt="gốc" />
-          )}
-
-          <button onClick={runEnhance} disabled={!enhanceImg || enhancing}
-            className="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-600 rounded font-bold disabled:opacity-40 text-sm">
-            {enhancing ? "⏳ Đang xử lý..." : "✨ Làm rõ tài liệu"}
-          </button>
-
-          {enhanceError && <p className="text-red-400 text-xs">{enhanceError}</p>}
-
-          {enhanceData && (
-            <>
-              <div className="flex gap-2">
-                <button onClick={downloadPNG} className="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">⬇ PNG</button>
-                <button onClick={downloadPDF} className="flex-1 py-2 bg-red-600 hover:bg-red-500 rounded text-sm font-medium">⬇ PDF</button>
-              </div>
-              <div ref={resultRef} className="bg-white text-black p-5 rounded-lg text-xs font-sans">
-                {enhanceData.company && <p className="font-bold text-xs mb-1">{enhanceData.company}</p>}
-                {enhanceData.title && <h2 className="text-center font-bold text-sm mb-1">{enhanceData.title}</h2>}
-                {enhanceData.metadata?.length > 0 && (
-                  <div className="grid grid-cols-2 gap-x-3 mb-3">
-                    {enhanceData.metadata.map((m: any, i: number) => (
-                      <div key={i}><span className="font-semibold">{m.label}:</span> {m.value}</div>
-                    ))}
-                  </div>
-                )}
-                {enhanceData.table?.headers?.length > 0 && (
-                  <table className="w-full border-collapse border border-gray-400 mb-3">
-                    <thead><tr className="bg-gray-100">
-                      {enhanceData.table.headers.map((h: string, i: number) => (
-                        <th key={i} className="border border-gray-400 px-1 py-1 text-left">{h}</th>
-                      ))}
-                    </tr></thead>
-                    <tbody>
-                      {enhanceData.table.rows.map((row: string[], i: number) => (
-                        <tr key={i}>{row.map((c, j) => <td key={j} className="border border-gray-400 px-1 py-1">{c}</td>)}</tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-                {enhanceData.summary?.length > 0 && (
-                  <div className="flex justify-end gap-4 mb-2 font-semibold">
-                    {enhanceData.summary.map((s: any, i: number) => <span key={i}>{s.label}: {s.value}</span>)}
-                  </div>
-                )}
-                {enhanceData.footer_company && <p className="font-semibold mb-3">{enhanceData.footer_company}</p>}
-                {enhanceData.signatures?.length > 0 && (
-                  <div className="grid grid-cols-4 gap-2 text-center mt-3 pt-3 border-t border-gray-300">
-                    {enhanceData.signatures.map((s: any, i: number) => (
-                      <div key={i}><div className="font-semibold mb-5">{s.role}</div><div className="italic">{s.name || ""}</div></div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
+          </div>
         </div>
       )}
     </div>

@@ -7,39 +7,65 @@ export type ChatMessage = {
   crisis?: boolean;
 };
 
+const Icon = ({ d }: { d: string }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
+);
+
 export default function MessageBubble({
-  m, onShare, onSpeak, sharing,
-}: { m: ChatMessage; onShare?: () => void; onSpeak?: () => void; sharing?: boolean }) {
+  m, onShare, onSpeak, onCopy, copied, sharing, streaming,
+}: {
+  m: ChatMessage;
+  onShare?: () => void; onSpeak?: () => void; onCopy?: () => void;
+  copied?: boolean; sharing?: boolean; streaming?: boolean;
+}) {
   if (m.role === "error") {
     return (
-      <div className="flex justify-start">
-        <div className="max-w-[90%] md:max-w-[75%] rounded-xl p-3 border border-red-500/40 bg-red-950/40 text-red-200 text-sm">
-          ⚠️ {m.content}
+      <div className="rounded-2xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">
+        ⚠️ {m.content}
+      </div>
+    );
+  }
+
+  if (m.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-3xl bg-[#3a3734]/90 backdrop-blur px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap break-words">
+          {m.content}
         </div>
       </div>
     );
   }
 
-  const isUser = m.role === "user";
+  // Câu trả lời của AI: không đóng khung, chữ thoáng như các ứng dụng chat quen thuộc.
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[90%] md:max-w-[75%] rounded-xl p-3 border ${isUser
-        ? "bg-blue-600 text-white border-blue-400/40"
-        : "bg-gray-800 text-cyan-100 border-cyan-400/20"}`}>
-        <Markdown text={m.content || ""} />
-        {(onShare || onSpeak) && m.content && (
-          <div className="mt-2 flex justify-end gap-2">
+    <div className="group flex gap-3">
+      <div className="shrink-0 mt-1 w-7 h-7 rounded-full grid place-items-center text-[13px]"
+        style={{ background: "color-mix(in srgb, var(--accent) 22%, transparent)", boxShadow: "0 0 14px color-mix(in srgb, var(--accent) 45%, transparent)" }}>
+        {m.crisis ? "🤍" : "🤬"}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[15px] leading-7">
+          <Markdown text={m.content || ""} />
+          {streaming && <span className="inline-block w-2 h-4 align-middle ml-0.5 animate-pulse" style={{ background: "var(--accent)" }} />}
+        </div>
+        {!streaming && m.content && (
+          <div className="mt-1.5 flex items-center gap-1 text-[#a39e96] opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+            {onCopy && (
+              <button onClick={onCopy} title="Chép" className="h-8 px-2 rounded-lg hover:bg-white/5 flex items-center gap-1 text-xs">
+                <Icon d={copied ? "M20 6 9 17l-5-5" : "M9 9h11v11H9zM5 15H4V4h11v1"} />{copied ? "Đã chép" : ""}
+              </button>
+            )}
             {onSpeak && (
-              <button onClick={onSpeak}
-                className="text-xs px-2 py-1 rounded border border-cyan-400/40 text-cyan-200 hover:bg-cyan-500/10">
-                🔊 Nghe
+              <button onClick={onSpeak} title="Nghe" className="h-8 px-2 rounded-lg hover:bg-white/5 flex items-center">
+                <Icon d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7" />
               </button>
             )}
             {onShare && !m.crisis && (
-            <button onClick={onShare} disabled={sharing}
-              className="text-xs px-2 py-1 rounded border border-rose-400/40 text-rose-200 hover:bg-rose-500/10 disabled:opacity-50">
-              {sharing ? "Đang vẽ..." : "📸 Khoe bị chửi"}
-            </button>
+              <button onClick={onShare} disabled={sharing} title="Xuất ảnh để khoe"
+                className="h-8 px-2 rounded-lg hover:bg-white/5 flex items-center gap-1.5 text-xs disabled:opacity-50">
+                <Icon d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" />
+                {sharing ? "Đang vẽ..." : "Khoe bị chửi"}
+              </button>
             )}
           </div>
         )}
