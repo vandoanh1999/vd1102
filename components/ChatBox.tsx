@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import Sidebar from "@/components/Sidebar";
 import type { Activity, Mood } from "@/components/MoodFace";
-import { detectTone, PERSONAS, type Level, type Persona } from "@/lib/persona";
+import { detectTone, PERSONAS, SEEN_MARK, type Level, type Persona } from "@/lib/persona";
 import { getConv, saveConv, newConvId, type StoredMessage } from "@/lib/localConvs";
 import {
   VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
@@ -24,22 +24,22 @@ const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "
 const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
 
 const GREETING: Record<Persona, { title: string; sub: string }> = {
-  ungho: { title: "Kể tao nghe đi.", sub: "Ý tưởng gì, kế hoạch gì tao cũng đứng về phía mày." },
-  phanbien: { title: "Đưa ý tưởng ra đây.", sub: "Cái gì tao cũng cãi được. Cãi đúng, cãi tới khi mày nản." },
+  ungho: { title: "Hôm nay kể tao nghe gì nào?", sub: "Người yêu mới: mày làm gì cũng đúng, nói gì cũng hay." },
+  phanbien: { title: "Lại nhắn cho bố à?", sub: "Người yêu cũ: nói lẹ đi, đang bận. Hỏi nhảm là bị seen." },
 };
 
 const SUGGESTIONS: Record<Persona, string[]> = {
   ungho: [
+    "Hôm nay tao mệt quá",
     "Tao định nghỉ việc mở quán cà phê",
-    "Tao vừa nghĩ ra ý tưởng làm app",
     "Tao muốn học lập trình ở tuổi 30",
     "Tao định cắt tóc kiểu mới",
   ],
   phanbien: [
+    "Alo",
+    "Tao định quay lại với mày",
     "Tao định nghỉ việc mở quán cà phê",
-    "Làm YouTube là con đường làm giàu",
-    "AI sẽ thay thế hết lập trình viên",
-    "Mua nhà sớm luôn tốt hơn đi thuê",
+    "Mày giúp tao được không",
   ],
 };
 
@@ -141,10 +141,11 @@ export default function ChatBox() {
     let ai = "";
     let ok = false;
     let crisis = false;
+    let seen = false;
     // Lịch sử cuộc hiện tại (chỉ câu hỏi/trả lời) gửi kèm để AI nhớ ngữ cảnh.
     const past: StoredMessage[] = messagesRef.current
       .filter((m): m is StoredMessage => m.role === "user" || m.role === "assistant")
-      .map(m => ({ role: m.role, content: m.content, ...(m.crisis ? { crisis: true } : {}) }));
+      .map(m => ({ role: m.role, content: m.content, ...(m.crisis ? { crisis: true } : {}), ...(m.seen ? { seen: true } : {}) }));
     const convId = convRef.current;
     setMessages(prev => [...prev, { role: "user", content: prompt }]);
     setInput("");
@@ -155,7 +156,10 @@ export default function ChatBox() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt,
-          history: past.slice(-20).map(m => ({ role: m.role, content: m.content })),
+          // Lượt NYC "đã xem" gửi kèm dưới dạng mã seen để AI nhớ là nó từng lờ đi.
+          history: past.flatMap(m => m.seen
+            ? [{ role: m.role, content: m.content }, { role: "assistant", content: SEEN_MARK }]
+            : [{ role: m.role, content: m.content }]).slice(-20),
           adult: adultRef.current,
           persona: personaRef.current,
         }),
@@ -192,6 +196,13 @@ export default function ChatBox() {
               }
               return [...prev, { role: "assistant", content: ai }];
             });
+          } else if (payload.type === "seen") {
+            seen = true;
+            setMessages(prev => {
+              const cp = [...prev];
+              for (let k = cp.length - 1; k >= 0; k--) if (cp[k].role === "user") { cp[k] = { ...cp[k], seen: true }; break; }
+              return cp;
+            });
           } else if (payload.type === "done") {
             ok = true;
             crisis = !!payload.crisis;
@@ -213,7 +224,7 @@ export default function ChatBox() {
       // Lưu cuộc trò chuyện xuống máy (kể cả khi lỗi, để không mất câu hỏi).
       saveConv(convId, [
         ...past,
-        { role: "user", content: prompt },
+        { role: "user", content: prompt, ...(seen ? { seen: true } : {}) },
         ...(ai ? [{ role: "assistant" as const, content: ai, ...(crisis ? { crisis: true } : {}) }] : []),
       ]);
     }

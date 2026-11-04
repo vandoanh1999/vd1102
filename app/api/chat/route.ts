@@ -1,5 +1,7 @@
 import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
-import { LEVELS, systemPrompt, turnReminder, detectCrisis, detectTone, addressHint, isPersona, type Persona } from "@/lib/persona";
+import {
+  LEVELS, systemPrompt, turnReminder, detectCrisis, detectTone, addressHint, isPersona, isPointless, SEEN_MARK, type Persona,
+} from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
 
@@ -24,6 +26,7 @@ function cleanHistory(raw: unknown): Turn[] {
   for (const m of raw.slice(-MAX_HISTORY_MESSAGES)) {
     const role = m?.role === "user" ? "user" : m?.role === "assistant" ? "assistant" : null;
     if (!role || typeof m?.content !== "string" || !m.content.trim()) continue;
+    // m.content === SEEN_MARK: lượt trước NYC đã "seen", giữ nguyên để AI hiểu ngữ cảnh.
     turns.push({ role, content: m.content.slice(0, MAX_PROMPT_CHARS) });
   }
   let budget = MAX_HISTORY_CHARS;
@@ -72,9 +75,34 @@ export async function POST(req: Request) {
 
   const { stream, send, close } = sse();
 
+  // NYC gặp tin nhắn gọi suông ("alo", "ê", "?") → "Đã xem" luôn, khỏi gọi AI.
+  if (persona === "phanbien" && !crisis && isPointless(prompt)) {
+    send({ type: "seen" });
+    send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true });
+    close();
+    return sseResponse(stream);
+  }
+
   (async () => {
     let answer = "";
     let lastError: unknown;
+    // Giữ lại vài ký tự đầu để nhận ra mã "Đã xem" trước khi gửi chữ nào ra màn hình.
+    let held = "";
+    let decided = false;
+    let seen = false;
+    const emit = (token: string) => {
+      if (seen) return;
+      if (!decided) {
+        held += token;
+        const head = held.trimStart();
+        if (head && SEEN_MARK.startsWith(head)) return;        // còn có thể là mã → chờ thêm
+        decided = true;
+        if (head.startsWith(SEEN_MARK)) { seen = true; return; }
+        token = held; held = "";
+      }
+      answer += token;
+      send({ type: "token", token });
+    };
     try {
       for (const model of await chatModels()) {
         try {
@@ -89,10 +117,16 @@ export async function POST(req: Request) {
           const clean = thinkFilter();
           for await (const chunk of completion) {
             const token = clean.push(chunk.choices?.[0]?.delta?.content || "");
-            if (token) { answer += token; send({ type: "token", token }); }
+            if (token) emit(token);
           }
           const tail = clean.end();
-          if (tail) { answer += tail; send({ type: "token", token: tail }); }
+          if (tail) emit(tail);
+          // Hết luồng mà phần giữ lại chưa đủ dài để quyết: đúng mã thì seen, không thì gửi ra.
+          if (!decided && held.trim()) {
+            decided = true;
+            if (held.trim().startsWith(SEEN_MARK.slice(0, -1))) seen = true;
+            else { answer += held; send({ type: "token", token: held }); }
+          }
           lastError = undefined;
           break;
         } catch (e) {
@@ -100,9 +134,16 @@ export async function POST(req: Request) {
           const status = (e as { status?: number })?.status;
           console.error(`[chat] model ${model} failed:`, status, String(e));
           if (status === 404) forgetModels();
-          if (answer) break; // đã stream được một phần thì không đổi model giữa chừng
+          if (answer || seen) break; // đã stream được một phần thì không đổi model giữa chừng
         }
       }
+      // Chỉ NYC mới được seen; khủng hoảng thì không bao giờ seen.
+      if (seen && persona === "phanbien" && !crisis) {
+        send({ type: "seen" });
+        send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true });
+        return;
+      }
+      if (seen) throw new Error("Empty answer");
       if (!answer) throw lastError ?? new Error("Empty answer");
       send({ type: "done", remaining: mine.remaining, crisis, tone: level });
     } catch (e) {
@@ -112,6 +153,10 @@ export async function POST(req: Request) {
     }
   })();
 
+  return sseResponse(stream);
+}
+
+function sseResponse(stream: ReadableStream) {
   return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",

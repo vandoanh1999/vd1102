@@ -5,7 +5,7 @@
  * Chỉ giữ 5 cuộc gần nhất; cuộc cũ hơn tự bị xoá.
  */
 
-export type StoredMessage = { role: "user" | "assistant"; content: string; crisis?: boolean };
+export type StoredMessage = { role: "user" | "assistant"; content: string; crisis?: boolean; seen?: boolean };
 export type LocalConv = { id: string; title: string; updatedAt: number; messages: StoredMessage[] };
 
 const KEY = "vnai.convs.v1";

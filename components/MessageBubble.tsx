@@ -5,6 +5,8 @@ export type ChatMessage = {
   role: "user" | "assistant" | "error";
   content: string;
   crisis?: boolean;
+  /** NYC đã xem mà không trả lời */
+  seen?: boolean;
 };
 
 const Icon = ({ d }: { d: string }) => (
@@ -28,10 +30,11 @@ export default function MessageBubble({
 
   if (m.role === "user") {
     return (
-      <div className="flex justify-end">
+      <div className="flex flex-col items-end gap-1">
         <div className="max-w-[85%] rounded-3xl bg-[#3a3734]/90 backdrop-blur px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap break-words">
           {m.content}
         </div>
+        {m.seen && <div className="text-[11px] text-[#8a857d] pr-2">Đã xem</div>}
       </div>
     );
   }
