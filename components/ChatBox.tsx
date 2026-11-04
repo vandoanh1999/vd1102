@@ -23,25 +23,22 @@ const NO_VI_VOICE =
 const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "#0d0707", care: "#1b1f24" };
 const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
 
-const GREETING: Record<Persona, { title: string; sub: string }> = {
-  ungho: { title: "Người yêu mới", sub: "Cái gì cũng chiều, nói gì cũng khen." },
-  phanbien: { title: "Người yêu cũ", sub: "Cái gì cũng cãi. Hỏi nhảm là bị seen." },
-};
+/**
+ * Câu chào mở màn: AI chủ động bắt chuyện, gọi bừa một cái tên (cố tình có thể nhầm) để người dùng
+ * bật lại kiểu "ai đấy? Mai nào?". Mấy câu độc lạ (trọng số cao) hiện nhiều hơn.
+ */
+const GREETINGS: [text: string, weight: number][] = [
+  ["Chào Chế", 3], ["Chào hia", 3], ["Chào ông xã húi", 3],
+  ["Chào Tuấn", 1], ["Chào Hương", 1], ["Chào Mai", 1], ["Chào em yêu", 1], ["Chào anh yêu", 1],
+  ["Chào bố", 1], ["Chào anh Guộc đậm", 1], ["Chào Linh", 1], ["Chào Hùng", 1], ["Chào Trang", 1],
+];
 
-const SUGGESTIONS: Record<Persona, string[]> = {
-  ungho: [
-    "Hôm nay tao mệt quá",
-    "Tao định nghỉ việc mở quán cà phê",
-    "Tao muốn học lập trình ở tuổi 30",
-    "Tao định cắt tóc kiểu mới",
-  ],
-  phanbien: [
-    "Alo",
-    "Tao định quay lại với mày",
-    "Tao định nghỉ việc mở quán cà phê",
-    "Mày giúp tao được không",
-  ],
-};
+function pickGreeting(): string {
+  const total = GREETINGS.reduce((a, [, w]) => a + w, 0);
+  let r = Math.random() * total;
+  for (const [g, w] of GREETINGS) { if ((r -= w) < 0) return g; }
+  return GREETINGS[0][0];
+}
 
 // localStorage có thể bị chặn (ẩn danh) → luôn bọc try/catch.
 const store = {
@@ -52,6 +49,9 @@ const store = {
 export default function ChatBox() {
   // Dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
   const convRef = useRef<string>("");
+  // Câu chào mở màn của cuộc mới; khi người dùng nhắn câu đầu, nó thành tin nhắn đầu tiên của AI.
+  const [greeting, setGreeting] = useState("");
+  const greetingRef = useRef("");
   // Tâm trạng SDE của NYC trong cuộc hiện tại (máy chủ tính, trình duyệt giữ hộ).
   const moodRef = useRef<StoredMood | undefined>(undefined);
   const [anger, setAnger] = useState<number | null>(null);
@@ -103,6 +103,7 @@ export default function ChatBox() {
     stopSpeaking();
     const c = id ? getConv(id) : undefined;
     convRef.current = c ? c.id : newConvId();
+    if (!c) { const g = pickGreeting(); greetingRef.current = g; setGreeting(g); } else { greetingRef.current = ""; }
     moodRef.current = c?.mood;
     setAnger(c?.mood ? c.mood.z[0] : null);
     setMessages(c ? c.messages : []);
@@ -148,11 +149,16 @@ export default function ChatBox() {
     let crisis = false;
     let seen = false;
     // Lịch sử cuộc hiện tại (chỉ câu hỏi/trả lời) gửi kèm để AI nhớ ngữ cảnh.
-    const past: StoredMessage[] = messagesRef.current
+    let past: StoredMessage[] = messagesRef.current
       .filter((m): m is StoredMessage => m.role === "user" || m.role === "assistant")
       .map(m => ({ role: m.role, content: m.content, ...(m.crisis ? { crisis: true } : {}), ...(m.seen ? { seen: true } : {}) }));
     const convId = convRef.current;
-    setMessages(prev => [...prev, { role: "user", content: prompt }]);
+    // Tin đầu tiên của cuộc mới: câu chào bâng quơ của AI trở thành tin nhắn đầu, để AI nhớ mình vừa chào ai.
+    const opener = !past.length && greetingRef.current ? greetingRef.current : "";
+    if (opener) { past = [{ role: "assistant", content: opener }]; greetingRef.current = ""; }
+    setMessages(prev => opener
+      ? [{ role: "assistant", content: opener }, ...prev.filter(m => m.role === "error"), { role: "user", content: prompt }]
+      : [...prev, { role: "user", content: prompt }]);
     setInput("");
 
     try {
@@ -357,7 +363,7 @@ export default function ChatBox() {
   const empty = messages.length === 0;
   const bg = MOOD_BG[mood];
   const accent = MOOD_ACCENT[mood];
-  const greet = GREETING[persona];
+
   const hasText = !!input.trim();
 
   return (
@@ -405,19 +411,10 @@ export default function ChatBox() {
         {/* Nội dung */}
         <div ref={scrollRef} className="relative z-10 flex-1 overflow-y-auto">
           {empty ? (
-            <div className="h-full flex flex-col items-center justify-end pb-6 px-4 text-center">
-              <h1 className="font-serif text-[28px] sm:text-4xl leading-tight mb-2" style={{ textShadow: "0 2px 18px rgba(0,0,0,.6)" }}>
-                {greet.title}
+            <div className="h-full flex flex-col items-center justify-end pb-10 px-4 text-center">
+              <h1 className="font-serif text-[34px] sm:text-5xl leading-tight" style={{ textShadow: "0 2px 18px rgba(0,0,0,.6)" }}>
+                {greeting}
               </h1>
-              <p className="text-sm text-[#a39e96] mb-5">{greet.sub}</p>
-              <div className="flex flex-wrap justify-center gap-2 max-w-xl">
-                {SUGGESTIONS[persona].map((s, i) => (
-                  <button key={s} onClick={() => sendTyped(s)} disabled={thinking}
-                    className={`${i >= 3 ? "hidden sm:inline-block" : ""} text-[13px] px-3.5 py-2 rounded-xl border border-white/10 bg-black/30 backdrop-blur hover:bg-white/10 transition-colors`}>
-                    {s}
-                  </button>
-                ))}
-              </div>
             </div>
           ) : (
             <div className="max-w-3xl mx-auto px-4 py-4 space-y-6">

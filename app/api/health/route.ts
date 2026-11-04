@@ -22,6 +22,7 @@ export async function GET(req: Request) {
   const level = params.get("probe");
   const persona = params.get("persona") === "phanbien" ? "phanbien" : "ungho";
   const ask = params.get("q")?.slice(0, 300);
+  const opener = params.get("opener")?.slice(0, 60);
   let probe: unknown;
   if ((level === "hien" || level === "khia" || level === "gat") && (await hit("probe:all", 30)).ok) {
     const question = ask || (level === "gat" ? "thủ đô việt nam là gì vậy đm" : level === "hien" ? "dạ cho em hỏi thủ đô việt nam là gì ạ" : "thủ đô của việt nam là gì");
@@ -33,6 +34,7 @@ export async function GET(req: Request) {
         messages: [
           { role: "system", content: systemPrompt(persona, level, false, addressHint(question)) },
           { role: "system", content: turnReminder(persona, addressHint(question)) },
+          ...(opener ? [{ role: "assistant" as const, content: opener }] : []),
           { role: "user", content: question },
         ],
         ...modelParams(chat[0]),
