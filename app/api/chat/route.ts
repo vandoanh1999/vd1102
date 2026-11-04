@@ -1,5 +1,5 @@
 import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
-import { LEVELS, systemPrompt, detectCrisis, detectTone, addressHint } from "@/lib/persona";
+import { LEVELS, systemPrompt, turnReminder, detectCrisis, detectTone, addressHint, isPersona, type Persona } from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
 
@@ -37,7 +37,7 @@ function cleanHistory(raw: unknown): Turn[] {
 }
 
 export async function POST(req: Request) {
-  let body: { prompt?: string; history?: unknown; adult?: boolean };
+  let body: { prompt?: string; history?: unknown; adult?: boolean; persona?: string };
   try { body = await req.json(); } catch { return json({ error: "Dữ liệu gửi lên bị lỗi." }, 400); }
 
   const prompt = (body.prompt || "").trim();
@@ -60,9 +60,13 @@ export async function POST(req: Request) {
   // Không khí cuộc trò chuyện (lịch sự / bình thường / gây sự) — tự đoán, người dùng không phải chọn.
   const saidBefore = history.filter(h => h.role === "user").map(h => h.content);
   const level = detectTone(prompt, saidBefore);
+  const persona: Persona = isPersona(body.persona) ? body.persona : "ungho";
+  const address = addressHint(prompt, saidBefore);
   const messages = [
-    { role: "system" as const, content: systemPrompt(level, crisis, addressHint(prompt, saidBefore)) },
+    { role: "system" as const, content: systemPrompt(persona, level, crisis, address) },
     ...history,
+    // Lệnh nhắc ẩn sát câu hỏi để AI trả lời đúng trọng tâm, giữ đúng nhân cách.
+    ...(crisis ? [] : [{ role: "system" as const, content: turnReminder(persona, address) }]),
     { role: "user" as const, content: prompt },
   ];
 

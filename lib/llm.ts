@@ -63,11 +63,11 @@ export async function sttModel(): Promise<string> {
 
 /**
  * Tham số riêng theo loại model:
- *  - gpt-oss là model "suy nghĩ trước khi nói": để mức nghĩ thấp cho nhanh (phần nghĩ không lẫn vào câu trả lời).
+ *  - gpt-oss là model "suy nghĩ trước khi nói": mức nghĩ vừa — đủ khôn mà vẫn nhanh (phần nghĩ không lẫn vào câu trả lời).
  *  - qwen3 có thể chèn <think>…</think> vào câu trả lời: yêu cầu giấu đi.
  */
 export function modelParams(model: string): Record<string, unknown> {
-  if (model.startsWith("openai/gpt-oss")) return { reasoning_effort: "low" };
+  if (model.startsWith("openai/gpt-oss")) return { reasoning_effort: "medium" }; // nghĩ kỹ hơn để trả lời khôn hơn
   if (/qwen3/i.test(model)) return { reasoning_format: "hidden" };
   return {};
 }

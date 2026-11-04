@@ -12,11 +12,11 @@ const Icon = ({ d }: { d: string }) => (
 );
 
 export default function MessageBubble({
-  m, onShare, onSpeak, onCopy, copied, sharing, streaming,
+  m, onSpeak, onCopy, copied, streaming,
 }: {
   m: ChatMessage;
-  onShare?: () => void; onSpeak?: () => void; onCopy?: () => void;
-  copied?: boolean; sharing?: boolean; streaming?: boolean;
+  onSpeak?: () => void; onCopy?: () => void;
+  copied?: boolean; streaming?: boolean;
 }) {
   if (m.role === "error") {
     return (
@@ -57,13 +57,6 @@ export default function MessageBubble({
             {onSpeak && (
               <button onClick={onSpeak} title="Nghe" className="h-8 px-2 rounded-lg hover:bg-white/5 flex items-center">
                 <Icon d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7" />
-              </button>
-            )}
-            {onShare && !m.crisis && (
-              <button onClick={onShare} disabled={sharing} title="Xuất ảnh để khoe"
-                className="h-8 px-2 rounded-lg hover:bg-white/5 flex items-center gap-1.5 text-xs disabled:opacity-50">
-                <Icon d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13" />
-                {sharing ? "Đang vẽ..." : "Khoe bị chửi"}
               </button>
             )}
           </div>

@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { availableModels, chatModels, sttModel, groq, modelParams } from "@/lib/llm";
-import { systemPrompt, addressHint } from "@/lib/persona";
+import { systemPrompt, turnReminder, addressHint } from "@/lib/persona";
 import { hit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
@@ -18,22 +18,26 @@ export async function GET(req: Request) {
   try { models = await availableModels(true); } catch (e) { ai = `error:${(e as { status?: number })?.status ?? "network"}`; }
   const chat = await chatModels();
 
-  const level = new URL(req.url).searchParams.get("probe");
+  const params = new URL(req.url).searchParams;
+  const level = params.get("probe");
+  const persona = params.get("persona") === "phanbien" ? "phanbien" : "ungho";
+  const ask = params.get("q")?.slice(0, 300);
   let probe: unknown;
   if ((level === "hien" || level === "khia" || level === "gat") && (await hit("probe:all", 30)).ok) {
-    const question = level === "gat" ? "thủ đô việt nam là gì vậy đm" : level === "hien" ? "dạ cho em hỏi thủ đô việt nam là gì ạ" : "thủ đô của việt nam là gì";
+    const question = ask || (level === "gat" ? "thủ đô việt nam là gì vậy đm" : level === "hien" ? "dạ cho em hỏi thủ đô việt nam là gì ạ" : "thủ đô của việt nam là gì");
     const started = Date.now();
     try {
       const r = await groq.chat.completions.create({
         model: chat[0],
-        max_tokens: 800,
+        max_tokens: 2_000,
         messages: [
-          { role: "system", content: systemPrompt(level, false, addressHint(question)) },
+          { role: "system", content: systemPrompt(persona, level, false, addressHint(question)) },
+          { role: "system", content: turnReminder(persona, addressHint(question)) },
           { role: "user", content: question },
         ],
         ...modelParams(chat[0]),
       } as Parameters<typeof groq.chat.completions.create>[0] & { stream?: false });
-      probe = { level, model: chat[0], ms: Date.now() - started, answer: r.choices[0]?.message?.content };
+      probe = { level, persona, model: chat[0], ms: Date.now() - started, answer: r.choices[0]?.message?.content };
     } catch (e) {
       probe = { level, error: (e as { status?: number })?.status, message: String(e).slice(0, 300) };
     }

@@ -4,8 +4,7 @@ import dynamic from "next/dynamic";
 import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import Sidebar from "@/components/Sidebar";
 import type { Activity, Mood } from "@/components/MoodFace";
-import { detectTone, type Level } from "@/lib/persona";
-import { shareRoast } from "@/lib/shareCard";
+import { detectTone, PERSONAS, type Level, type Persona } from "@/lib/persona";
 import { getConv, saveConv, newConvId, type StoredMessage } from "@/lib/localConvs";
 import {
   VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
@@ -24,16 +23,25 @@ const NO_VI_VOICE =
 const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "#0d0707", care: "#1b1f24" };
 const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
 
-const GREETING = { title: "Hỏi gì thì hỏi lẹ đi.", sub: "Cái gì tao cũng biết. Hỏi ngu thì ráng chịu." };
+const GREETING: Record<Persona, { title: string; sub: string }> = {
+  ungho: { title: "Kể tao nghe đi.", sub: "Ý tưởng gì, kế hoạch gì tao cũng đứng về phía mày." },
+  phanbien: { title: "Đưa ý tưởng ra đây.", sub: "Cái gì tao cũng cãi được. Cãi đúng, cãi tới khi mày nản." },
+};
 
-const SUGGESTIONS = [
-  "1 + 1 bằng mấy?",
-  "Trái đất hình gì vậy?",
-  "Viết code Python in ra Hello World",
-  "Làm sao để giàu nhanh?",
-  "Giải thích blockchain cho tôi",
-  "Tại sao bầu trời màu xanh?",
-];
+const SUGGESTIONS: Record<Persona, string[]> = {
+  ungho: [
+    "Tao định nghỉ việc mở quán cà phê",
+    "Tao vừa nghĩ ra ý tưởng làm app",
+    "Tao muốn học lập trình ở tuổi 30",
+    "Tao định cắt tóc kiểu mới",
+  ],
+  phanbien: [
+    "Tao định nghỉ việc mở quán cà phê",
+    "Làm YouTube là con đường làm giàu",
+    "AI sẽ thay thế hết lập trình viên",
+    "Mua nhà sớm luôn tốt hơn đi thuê",
+  ],
+};
 
 // localStorage có thể bị chặn (ẩn danh) → luôn bọc try/catch.
 const store = {
@@ -54,7 +62,8 @@ export default function ChatBox() {
   const [adult, setAdult] = useState<boolean | null>(null);
   const [declined, setDeclined] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
-  const [sharingIdx, setSharingIdx] = useState<number | null>(null);
+  const [persona, setPersona] = useState<Persona>("ungho");
+  const personaRef = useRef<Persona>("ungho");
   const [drawer, setDrawer] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
 
@@ -79,6 +88,8 @@ export default function ChatBox() {
   // Nhớ cấp độ, xác nhận 18+ và "Đọc to" của người dùng trên máy này.
   useEffect(() => {
     setAdult(store.get("vnai.adult") === "1");
+    const p = store.get("vnai.persona");
+    if (p === "ungho" || p === "phanbien") { setPersona(p); personaRef.current = p; }
     setSpeakOn(store.get("vnai.speak") === "1");
     setCanVoice(voiceSupported());
     recorderRef.current = new VoiceRecorder();
@@ -111,6 +122,13 @@ export default function ChatBox() {
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, [input]);
 
+  /** Đổi nhân cách: bắt đầu cuộc mới để AI không lẫn giọng giữa hai nhân cách. */
+  const pickPersona = (p: Persona) => {
+    if (p === personaRef.current) return;
+    setPersona(p); personaRef.current = p; store.set("vnai.persona", p);
+    if (messagesRef.current.length) openConversation(null);
+  };
+
   const confirmAdult = () => { setAdult(true); store.set("vnai.adult", "1"); };
 
   const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
@@ -139,6 +157,7 @@ export default function ChatBox() {
           prompt,
           history: past.slice(-20).map(m => ({ role: m.role, content: m.content })),
           adult: adultRef.current,
+          persona: personaRef.current,
         }),
       });
 
@@ -291,16 +310,6 @@ export default function ChatBox() {
     endCall();
   };
 
-  const share = async (i: number) => {
-    const answer = messages[i];
-    const question = [...messages.slice(0, i)].reverse().find(m => m.role === "user");
-    if (!answer || !question) return;
-    setSharingIdx(i);
-    try { await shareRoast(question.content, answer.content); }
-    catch { fail("Không tạo được ảnh. Thử lại nhé."); }
-    finally { setSharingIdx(null); }
-  };
-
   const copy = async (i: number) => {
     try { await navigator.clipboard.writeText(messages[i].content); setCopied(i); setTimeout(() => setCopied(null), 1500); }
     catch { /* trình duyệt chặn clipboard */ }
@@ -315,7 +324,8 @@ export default function ChatBox() {
     return said.length ? detectTone(said[said.length - 1], said.slice(0, -1)) : "khia";
   }, [messages]);
   toneRef.current = tone;
-  const mood: Mood = lastAssistant?.crisis ? "care" : tone;
+  // Ủng hộ → luôn mặt cười; Phản biện → nhếch mép, bị chửi lại thì mắt đỏ.
+  const mood: Mood = lastAssistant?.crisis ? "care" : persona === "ungho" ? "hien" : tone === "gat" ? "gat" : "khia";
   const streaming = thinking && messages[messages.length - 1]?.role === "assistant";
   const activity: Activity =
     phase === "listening" ? "listening"
@@ -325,7 +335,7 @@ export default function ChatBox() {
   const empty = messages.length === 0;
   const bg = MOOD_BG[mood];
   const accent = MOOD_ACCENT[mood];
-  const greet = GREETING;
+  const greet = GREETING[persona];
   const hasText = !!input.trim();
 
   return (
@@ -350,8 +360,18 @@ export default function ChatBox() {
           <button onClick={() => setDrawer(true)} className="md:hidden w-9 h-9 grid place-items-center rounded-lg hover:bg-white/5" aria-label="Mở lịch sử">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
           </button>
-          <div className="md:hidden font-semibold tracking-tight">VNAI</div>
-          <div className="flex-1" />
+          <div className="flex-1 flex justify-center">
+            <div className="inline-flex p-1 rounded-full bg-black/30 border border-white/10 backdrop-blur" role="tablist" aria-label="Chọn nhân cách">
+              {(Object.keys(PERSONAS) as Persona[]).map(p => (
+                <button key={p} role="tab" aria-selected={persona === p} title={PERSONAS[p].desc}
+                  onClick={() => pickPersona(p)}
+                  className={`h-8 px-4 rounded-full text-[13px] transition-colors ${persona === p ? "text-black font-medium" : "text-[#cfc9c0] hover:text-white"}`}
+                  style={persona === p ? { background: accent } : undefined}>
+                  {PERSONAS[p].label}
+                </button>
+              ))}
+            </div>
+          </div>
           {!empty && (
             <button onClick={() => openConversation(null)} title="Cuộc mới"
               className="w-9 h-9 grid place-items-center rounded-lg hover:bg-white/5" aria-label="Cuộc mới">
@@ -369,7 +389,7 @@ export default function ChatBox() {
               </h1>
               <p className="text-sm text-[#a39e96] mb-5">{greet.sub}</p>
               <div className="flex flex-wrap justify-center gap-2 max-w-xl">
-                {SUGGESTIONS.map((s, i) => (
+                {SUGGESTIONS[persona].map((s, i) => (
                   <button key={s} onClick={() => sendTyped(s)} disabled={thinking}
                     className={`${i >= 3 ? "hidden sm:inline-block" : ""} text-[13px] px-3.5 py-2 rounded-xl border border-white/10 bg-black/30 backdrop-blur hover:bg-white/10 transition-colors`}>
                     {s}
@@ -381,11 +401,9 @@ export default function ChatBox() {
             <div className="max-w-3xl mx-auto px-4 py-4 space-y-6">
               {messages.map((m, i) => (
                 <MessageBubble key={i} m={m}
-                  onShare={m.role === "assistant" ? () => share(i) : undefined}
                   onSpeak={m.role === "assistant" ? () => { unlockSpeech(); speakAnswer(m.content); } : undefined}
                   onCopy={m.role === "assistant" ? () => copy(i) : undefined}
                   copied={copied === i}
-                  sharing={sharingIdx === i}
                   streaming={streaming && i === messages.length - 1} />
               ))}
               {thinking && messages[messages.length - 1]?.role === "user" && (
@@ -449,7 +467,7 @@ export default function ChatBox() {
               </div>
             </div>
             <p className="text-[11px] text-[#8a857d] text-center mt-2">
-              VNAI chửi cho vui, không nhằm xúc phạm ai. Đang buồn thật thì cứ nói thật, nó sẽ thôi diễn.
+              VNAI có thể sai, thông tin quan trọng hãy kiểm tra lại.
               {remaining !== null && <> · Còn {remaining} câu hôm nay</>}
             </p>
           </div>
