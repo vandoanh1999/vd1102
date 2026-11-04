@@ -1,7 +1,9 @@
 import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
 import {
-  LEVELS, systemPrompt, turnReminder, detectCrisis, detectTone, addressHint, isPersona, isPointless, SEEN_MARK, type Persona,
+  LEVELS, systemPrompt, turnReminder, detectCrisis, detectTone, addressHint, isPersona, isPointless, isHot, SEEN_MARK,
+  type Persona, type Level,
 } from "@/lib/persona";
+import { parseMood, step, classifyMessage, seenProbability, moodInstruction, type MoodState, type MoodEvent } from "@/lib/mood";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
 
@@ -40,7 +42,7 @@ function cleanHistory(raw: unknown): Turn[] {
 }
 
 export async function POST(req: Request) {
-  let body: { prompt?: string; history?: unknown; adult?: boolean; persona?: string };
+  let body: { prompt?: string; history?: unknown; adult?: boolean; persona?: string; mood?: unknown };
   try { body = await req.json(); } catch { return json({ error: "Dữ liệu gửi lên bị lỗi." }, 400); }
 
   const prompt = (body.prompt || "").trim();
@@ -62,11 +64,29 @@ export async function POST(req: Request) {
   const crisis = detectCrisis(prompt);
   // Không khí cuộc trò chuyện (lịch sự / bình thường / gây sự) — tự đoán, người dùng không phải chọn.
   const saidBefore = history.filter(h => h.role === "user").map(h => h.content);
-  const level = detectTone(prompt, saidBefore);
   const persona: Persona = isPersona(body.persona) ? body.persona : "ungho";
   const address = addressHint(prompt, saidBefore);
+
+  // ── Tâm trạng SDE của NYC: nguôi theo thời gian vắng mặt rồi nhảy theo tin nhắn mới ──
+  let mood: MoodState | undefined;
+  let event: MoodEvent | undefined;
+  let seenNow = false;
+  if (persona === "phanbien") {
+    event = classifyMessage(prompt, saidBefore[saidBefore.length - 1], { isPointless, isHot, isCrisis: detectCrisis });
+    mood = step(parseMood(body.mood), event);
+    seenNow = !crisis && Math.random() < seenProbability(mood.z, event);
+  }
+  // Độ gắt: NYC theo độ giận; còn lại theo không khí lời người dùng.
+  let level: Level = detectTone(prompt, saidBefore);
+  if (mood) level = mood.z[0] >= 0.6 ? "gat" : mood.z[0] < 0.3 && level !== "gat" ? "hien" : level;
+
   const messages = [
     { role: "system" as const, content: systemPrompt(persona, level, crisis, address) },
+    ...(mood && !crisis ? [{ role: "system" as const, content: moodInstruction(mood.z) }] : []),
+    // Xúc xắc đã quyết là lần này KHÔNG seen → bảo AI trả lời (cộc lốc) để cùng một câu "alo" lúc rep lúc không.
+    ...(mood && !crisis && (event === "pointless" || event === "repeat")
+      ? [{ role: "system" as const, content: `Lần này đừng dùng ${SEEN_MARK}: trả lời đúng 1 câu cộc lốc, lầy lội, kiểu bị làm phiền.` }]
+      : []),
     ...history,
     // Lệnh nhắc ẩn sát câu hỏi để AI trả lời đúng trọng tâm, giữ đúng nhân cách.
     ...(crisis ? [] : [{ role: "system" as const, content: turnReminder(persona, address) }]),
@@ -75,10 +95,10 @@ export async function POST(req: Request) {
 
   const { stream, send, close } = sse();
 
-  // NYC gặp tin nhắn gọi suông ("alo", "ê", "?") → "Đã xem" luôn, khỏi gọi AI.
-  if (persona === "phanbien" && !crisis && isPointless(prompt)) {
+  // NYC tung xúc xắc theo tâm trạng: trúng thì "Đã xem" luôn, khỏi gọi AI.
+  if (seenNow) {
     send({ type: "seen" });
-    send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true });
+    send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true, mood });
     close();
     return sseResponse(stream);
   }
@@ -140,14 +160,14 @@ export async function POST(req: Request) {
       // Chỉ NYC mới được seen; khủng hoảng thì không bao giờ seen.
       if (seen && persona === "phanbien" && !crisis) {
         send({ type: "seen" });
-        send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true });
+        send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true, mood });
         return;
       }
       if (seen) throw new Error("Empty answer");
       if (!answer) throw lastError ?? new Error("Empty answer");
-      send({ type: "done", remaining: mine.remaining, crisis, tone: level });
+      send({ type: "done", remaining: mine.remaining, crisis, tone: level, mood, event });
     } catch (e) {
-      send({ type: "error", message: friendlyAIError(e) });
+      send({ type: "error", message: friendlyAIError(e), mood });
     } finally {
       close();
     }

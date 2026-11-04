@@ -49,6 +49,20 @@ const LOOKS: Record<Mood, Look> = {
 
 const MOUTH_BEADS = 22;
 
+const smoothstep = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+
+/** Trộn hai biểu cảm theo tỉ lệ s (chỉ các thông số số; màu trộn riêng). */
+function mixLook(a: Look, b: Look, s: number): Look {
+  const out = { ...a };
+  (Object.keys(a) as (keyof Look)[]).forEach(k => {
+    if (typeof a[k] === "number") (out as any)[k] = (a[k] as number) * (1 - s) + (b[k] as number) * s;
+  });
+  return out;
+}
+
 function webglOk(): boolean {
   try {
     const c = document.createElement("canvas");
@@ -57,11 +71,11 @@ function webglOk(): boolean {
 }
 
 export default function MoodFace({
-  mood, activity, level = 0, prominent = true,
-}: { mood: Mood; activity: Activity; level?: number; prominent?: boolean }) {
+  mood, activity, level = 0, prominent = true, anger = null,
+}: { mood: Mood; activity: Activity; level?: number; prominent?: boolean; anger?: number | null }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const live = useRef({ mood, activity, level, prominent });
-  live.current = { mood, activity, level, prominent };
+  const live = useRef({ mood, activity, level, prominent, anger });
+  live.current = { mood, activity, level, prominent, anger };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -192,15 +206,25 @@ export default function MoodFace({
       if (!running) return;
       const dt = Math.min(clock.getDelta(), 0.05);
       const t = clock.elapsedTime;
-      const { mood: m, activity: a, level: inLvl, prominent: big } = live.current;
-      const L = LOOKS[m];
+      const { mood: m, activity: a, level: inLvl, prominent: big, anger: ang } = live.current;
+      // Có độ giận liên tục (tâm trạng SDE của NYC) → trộn dần giữa mặt nhếch mép và mặt mắt đỏ.
+      const blend = typeof ang === "number" && m !== "care" && m !== "hien";
+      const s = blend ? smoothstep(0.35, 0.9, ang as number) : 0;
+      const L: Look = blend ? mixLook(LOOKS.khia, LOOKS.gat, s) : LOOKS[m];
       const k = 1 - Math.pow(0.0015, dt); // tốc độ nội suy ~ 0.25s
 
       // Nội suy các thông số hình học
       (Object.keys(L) as (keyof Look)[]).forEach(p => {
         if (typeof L[p] === "number") (cur as any)[p] += ((L[p] as number) - (cur as any)[p]) * k;
       });
-      tgtColors.eye.set(L.eye); tgtColors.bg.set(L.bg); tgtColors.head.set(L.head); tgtColors.rim.set(L.rim);
+      if (blend) {
+        tgtColors.eye.set(LOOKS.khia.eye).lerp(new THREE.Color(LOOKS.gat.eye), s);
+        tgtColors.bg.set(LOOKS.khia.bg).lerp(new THREE.Color(LOOKS.gat.bg), s);
+        tgtColors.head.set(LOOKS.khia.head).lerp(new THREE.Color(LOOKS.gat.head), s);
+        tgtColors.rim.set(LOOKS.khia.rim).lerp(new THREE.Color(LOOKS.gat.rim), s);
+      } else {
+        tgtColors.eye.set(L.eye); tgtColors.bg.set(L.bg); tgtColors.head.set(L.head); tgtColors.rim.set(L.rim);
+      }
       cur.eyeC.lerp(tgtColors.eye, k); cur.bgC.lerp(tgtColors.bg, k);
       cur.headC.lerp(tgtColors.head, k); cur.rimC.lerp(tgtColors.rim, k);
 

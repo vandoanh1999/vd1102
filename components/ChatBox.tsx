@@ -5,7 +5,7 @@ import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import Sidebar from "@/components/Sidebar";
 import type { Activity, Mood } from "@/components/MoodFace";
 import { detectTone, PERSONAS, SEEN_MARK, type Level, type Persona } from "@/lib/persona";
-import { getConv, saveConv, newConvId, type StoredMessage } from "@/lib/localConvs";
+import { getConv, saveConv, newConvId, type StoredMessage, type StoredMood } from "@/lib/localConvs";
 import {
   VoiceRecorder, transcribe, speak, stopSpeaking, unlockSpeech, hasVietnameseVoice, voiceSupported,
 } from "@/lib/voice";
@@ -52,6 +52,10 @@ const store = {
 export default function ChatBox() {
   // Dạng ref: vòng lặp chế độ gọi chạy lâu, không được đọc giá trị cũ của state.
   const convRef = useRef<string>("");
+  // Tâm trạng SDE của NYC trong cuộc hiện tại (máy chủ tính, trình duyệt giữ hộ).
+  const moodRef = useRef<StoredMood | undefined>(undefined);
+  const [anger, setAnger] = useState<number | null>(null);
+  const [debug, setDebug] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -88,6 +92,7 @@ export default function ChatBox() {
   // Nhớ cấp độ, xác nhận 18+ và "Đọc to" của người dùng trên máy này.
   useEffect(() => {
     setAdult(store.get("vnai.adult") === "1");
+    try { setDebug(new URLSearchParams(window.location.search).has("debug")); } catch { /* bỏ qua */ }
     const p = store.get("vnai.persona");
     if (p === "ungho" || p === "phanbien") { setPersona(p); personaRef.current = p; }
     setSpeakOn(store.get("vnai.speak") === "1");
@@ -100,6 +105,8 @@ export default function ChatBox() {
     stopSpeaking();
     const c = id ? getConv(id) : undefined;
     convRef.current = c ? c.id : newConvId();
+    moodRef.current = c?.mood;
+    setAnger(c?.mood ? c.mood.z[0] : null);
     setMessages(c ? c.messages : []);
     setDrawer(false);
   }, []);
@@ -162,6 +169,7 @@ export default function ChatBox() {
             : [{ role: m.role, content: m.content }]).slice(-20),
           adult: adultRef.current,
           persona: personaRef.current,
+          mood: moodRef.current,
         }),
       });
 
@@ -205,6 +213,7 @@ export default function ChatBox() {
             });
           } else if (payload.type === "done") {
             ok = true;
+            if (payload.mood) { moodRef.current = payload.mood; setAnger(payload.mood.z[0]); }
             crisis = !!payload.crisis;
             if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
             if (crisis) setMessages(prev => {
@@ -213,6 +222,7 @@ export default function ChatBox() {
               return cp;
             });
           } else if (payload.type === "error") {
+            if (payload.mood) { moodRef.current = payload.mood; setAnger(payload.mood.z[0]); }
             fail(payload.message || "Có lỗi khi gọi AI.");
           }
         }
@@ -226,7 +236,7 @@ export default function ChatBox() {
         ...past,
         { role: "user", content: prompt, ...(seen ? { seen: true } : {}) },
         ...(ai ? [{ role: "assistant" as const, content: ai, ...(crisis ? { crisis: true } : {}) }] : []),
-      ]);
+      ], moodRef.current);
     }
     return ok ? ai : "";
   };
@@ -336,7 +346,12 @@ export default function ChatBox() {
   }, [messages]);
   toneRef.current = tone;
   // Ủng hộ → luôn mặt cười; Phản biện → nhếch mép, bị chửi lại thì mắt đỏ.
-  const mood: Mood = lastAssistant?.crisis ? "care" : persona === "ungho" ? "hien" : tone === "gat" ? "gat" : "khia";
+  const mood: Mood = lastAssistant?.crisis ? "care"
+    : persona === "ungho" ? "hien"
+      : anger !== null ? (anger >= 0.6 ? "gat" : "khia")
+        : tone === "gat" ? "gat" : "khia";
+  // Độ giận liên tục 0..1 cho mặt 3D (chỉ NYC): nội suy dần từ nhếch mép sang mắt đỏ.
+  const faceAnger = persona === "phanbien" && !lastAssistant?.crisis ? (anger ?? (tone === "gat" ? 0.8 : 0.35)) : null;
   const streaming = thinking && messages[messages.length - 1]?.role === "assistant";
   const activity: Activity =
     phase === "listening" ? "listening"
@@ -357,7 +372,7 @@ export default function ChatBox() {
       <main className="relative flex-1 min-w-0 flex flex-col">
         {/* Gương mặt 3D phía sau */}
         <div className="absolute inset-0 z-0 pointer-events-none">
-          <MoodFace mood={mood} activity={activity} level={micLevel} prominent={empty || callMode} />
+          <MoodFace mood={mood} activity={activity} level={micLevel} prominent={empty || callMode} anger={faceAnger} />
         </div>
         {/* Lớp mờ để chữ dễ đọc khi đang trò chuyện */}
         <div className="absolute inset-0 z-0 pointer-events-none transition-opacity duration-700"
@@ -480,6 +495,9 @@ export default function ChatBox() {
             <p className="text-[11px] text-[#8a857d] text-center mt-2">
               VNAI có thể sai, thông tin quan trọng hãy kiểm tra lại.
               {remaining !== null && <> · Còn {remaining} câu hôm nay</>}
+              {debug && persona === "phanbien" && moodRef.current && (
+                <> · giận {Math.round(moodRef.current.z[0] * 100)} · thương {Math.round(moodRef.current.z[1] * 100)} · chán {Math.round(moodRef.current.z[2] * 100)}</>
+              )}
             </p>
           </div>
         </div>

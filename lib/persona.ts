@@ -228,6 +228,11 @@ function toneOf(text: string): Level | null {
   return null;
 }
 
+/** Tin nhắn có chửi bậy / gây sự không. */
+export function isHot(text: string): boolean {
+  return toneOf(text) === "gat";
+}
+
 /**
  * Không khí hiện tại: xét câu mới nhất trước; nếu câu đó trung tính thì giữ không khí
  * của vài câu trước (để mặt không "đổi tính" liên tục). Mặc định: cà khịa.

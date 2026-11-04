@@ -6,7 +6,9 @@
  */
 
 export type StoredMessage = { role: "user" | "assistant"; content: string; crisis?: boolean; seen?: boolean };
-export type LocalConv = { id: string; title: string; updatedAt: number; messages: StoredMessage[] };
+/** Tâm trạng SDE của NYC cho cuộc trò chuyện này: z = [giận, thương, chán], t = thời điểm cập nhật (ms). */
+export type StoredMood = { z: [number, number, number]; t: number };
+export type LocalConv = { id: string; title: string; updatedAt: number; messages: StoredMessage[]; mood?: StoredMood };
 
 const KEY = "vnai.convs.v1";
 export const MAX_CONVS = 5;
@@ -41,12 +43,14 @@ export function getConv(id: string): LocalConv | undefined {
   return loadConvs().find(c => c.id === id);
 }
 
-export function saveConv(id: string, messages: StoredMessage[]) {
+export function saveConv(id: string, messages: StoredMessage[], mood?: StoredMood) {
   const clean = messages.filter(m => (m.role === "user" || m.role === "assistant") && m.content).slice(-MAX_MESSAGES_PER_CONV);
   if (!clean.length) return;
   const firstQ = clean.find(m => m.role === "user")?.content || "Cuộc trò chuyện";
-  const list = loadConvs().filter(c => c.id !== id);
-  list.push({ id, title: firstQ.slice(0, 60), updatedAt: Date.now(), messages: clean });
+  const old = loadConvs();
+  const prevMood = old.find(c => c.id === id)?.mood;
+  const list = old.filter(c => c.id !== id);
+  list.push({ id, title: firstQ.slice(0, 60), updatedAt: Date.now(), messages: clean, ...((mood ?? prevMood) ? { mood: mood ?? prevMood } : {}) });
   write(list);
 }
 
