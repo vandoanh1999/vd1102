@@ -24,8 +24,8 @@ const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "
 const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
 
 const GREETING: Record<Persona, { title: string; sub: string }> = {
-  ungho: { title: "Hôm nay kể tao nghe gì nào?", sub: "Người yêu mới: mày làm gì cũng đúng, nói gì cũng hay." },
-  phanbien: { title: "Lại nhắn cho bố à?", sub: "Người yêu cũ: nói lẹ đi, đang bận. Hỏi nhảm là bị seen." },
+  ungho: { title: "Người yêu mới", sub: "Cái gì cũng chiều, nói gì cũng khen." },
+  phanbien: { title: "Người yêu cũ", sub: "Cái gì cũng cãi. Hỏi nhảm là bị seen." },
 };
 
 const SUGGESTIONS: Record<Persona, string[]> = {
