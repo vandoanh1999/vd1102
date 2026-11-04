@@ -65,7 +65,7 @@ export async function hit(key: string, limit: number): Promise<Hit> {
 const num = (v: string | undefined, d: number) => (v && Number(v) > 0 ? Number(v) : d);
 
 export const LIMITS = {
-  chatPerClient: num(process.env.LIMIT_CHAT_PER_DAY, 200),
+  chatPerClient: num(process.env.LIMIT_CHAT_PER_DAY, 2_000),   // chỉ để chặn spam bằng máy, người thật không chạm tới
   chatGlobal: num(process.env.LIMIT_CHAT_GLOBAL_PER_DAY, 5_000),
   sttPerClient: num(process.env.LIMIT_STT_PER_DAY, 60),
 };

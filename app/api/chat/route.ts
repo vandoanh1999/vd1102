@@ -54,9 +54,10 @@ export async function POST(req: Request) {
   if (body.adult !== true) return json({ error: "Cần xác nhận đủ 18 tuổi trước khi trò chuyện." }, 403);
 
   // ── Giới hạn: mỗi máy N câu/ngày, toàn trang M câu/ngày (giữ ví tiền Groq) ──
+  // Giai đoạn thử nghiệm: không giới hạn số câu mỗi người. Chỉ giữ trần chống spam rất cao
+  // theo máy (không hiện ra) và trần toàn trang để kịch bản tự động không vét sạch lượt Groq.
   const mine = await hit(`chat:${clientId(req)}`, LIMITS.chatPerClient);
-  if (!mine.ok)
-    return json({ error: `Hết ${LIMITS.chatPerClient} câu hôm nay rồi. Mai quay lại ăn chửi tiếp nhé.`, limit: true, remaining: 0 }, 429);
+  if (!mine.ok) return json({ error: "Nhắn nhanh quá, nghỉ tay chút rồi quay lại nhé.", limit: true }, 429);
   const global = await hit("chat:all", LIMITS.chatGlobal);
   if (!global.ok) return json({ error: "Hôm nay VNAI chửi nhiều quá khản cả cổ rồi. Mai quay lại nhé.", limit: true }, 429);
 
@@ -98,7 +99,7 @@ export async function POST(req: Request) {
   // NYC tung xúc xắc theo tâm trạng: trúng thì "Đã xem" luôn, khỏi gọi AI.
   if (seenNow) {
     send({ type: "seen" });
-    send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true, mood });
+    send({ type: "done", crisis: false, tone: level, seen: true, mood });
     close();
     return sseResponse(stream);
   }
@@ -160,12 +161,12 @@ export async function POST(req: Request) {
       // Chỉ NYC mới được seen; khủng hoảng thì không bao giờ seen.
       if (seen && persona === "phanbien" && !crisis) {
         send({ type: "seen" });
-        send({ type: "done", remaining: mine.remaining, crisis: false, tone: level, seen: true, mood });
+        send({ type: "done", crisis: false, tone: level, seen: true, mood });
         return;
       }
       if (seen) throw new Error("Empty answer");
       if (!answer) throw lastError ?? new Error("Empty answer");
-      send({ type: "done", remaining: mine.remaining, crisis, tone: level, mood, event });
+      send({ type: "done", crisis, tone: level, mood, event });
     } catch (e) {
       send({ type: "error", message: friendlyAIError(e), mood });
     } finally {

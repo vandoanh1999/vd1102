@@ -65,9 +65,9 @@ export default function ChatBox() {
   // null = chưa đọc xong bộ nhớ máy (tránh hộp xác nhận nháy lên rồi tắt)
   const [adult, setAdult] = useState<boolean | null>(null);
   const [declined, setDeclined] = useState(false);
-  const [remaining, setRemaining] = useState<number | null>(null);
-  const [persona, setPersona] = useState<Persona>("ungho");
-  const personaRef = useRef<Persona>("ungho");
+  // Mặc định vào là gặp NYC trước.
+  const [persona, setPersona] = useState<Persona>("phanbien");
+  const personaRef = useRef<Persona>("phanbien");
   const [drawer, setDrawer] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
 
@@ -93,8 +93,6 @@ export default function ChatBox() {
   useEffect(() => {
     setAdult(store.get("vnai.adult") === "1");
     try { setDebug(new URLSearchParams(window.location.search).has("debug")); } catch { /* bỏ qua */ }
-    const p = store.get("vnai.persona");
-    if (p === "ungho" || p === "phanbien") { setPersona(p); personaRef.current = p; }
     setSpeakOn(store.get("vnai.speak") === "1");
     setCanVoice(voiceSupported());
     recorderRef.current = new VoiceRecorder();
@@ -132,7 +130,7 @@ export default function ChatBox() {
   /** Đổi nhân cách: bắt đầu cuộc mới để AI không lẫn giọng giữa hai nhân cách. */
   const pickPersona = (p: Persona) => {
     if (p === personaRef.current) return;
-    setPersona(p); personaRef.current = p; store.set("vnai.persona", p);
+    setPersona(p); personaRef.current = p;
     if (messagesRef.current.length) openConversation(null);
   };
 
@@ -175,7 +173,6 @@ export default function ChatBox() {
 
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
-        if (data.limit) setRemaining(0);
         fail(data.error || `Lỗi máy chủ (${res.status}). Thử lại sau.`);
         return "";
       }
@@ -215,7 +212,6 @@ export default function ChatBox() {
             ok = true;
             if (payload.mood) { moodRef.current = payload.mood; setAnger(payload.mood.z[0]); }
             crisis = !!payload.crisis;
-            if (typeof payload.remaining === "number" && payload.remaining >= 0) setRemaining(payload.remaining);
             if (crisis) setMessages(prev => {
               const cp = [...prev]; const last = cp[cp.length - 1];
               if (last?.role === "assistant") cp[cp.length - 1] = { ...last, crisis: true };
@@ -494,7 +490,6 @@ export default function ChatBox() {
             </div>
             <p className="text-[11px] text-[#8a857d] text-center mt-2">
               VNAI có thể sai, thông tin quan trọng hãy kiểm tra lại.
-              {remaining !== null && <> · Còn {remaining} câu hôm nay</>}
               {debug && persona === "phanbien" && moodRef.current && (
                 <> · giận {Math.round(moodRef.current.z[0] * 100)} · thương {Math.round(moodRef.current.z[1] * 100)} · chán {Math.round(moodRef.current.z[2] * 100)}</>
               )}
