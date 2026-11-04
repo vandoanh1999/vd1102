@@ -1,5 +1,5 @@
 import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
-import { LEVELS, systemPrompt, detectCrisis, detectTone } from "@/lib/persona";
+import { LEVELS, systemPrompt, detectCrisis, detectTone, addressHint } from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
 
@@ -58,9 +58,10 @@ export async function POST(req: Request) {
   const history = cleanHistory(body.history);
   const crisis = detectCrisis(prompt);
   // Không khí cuộc trò chuyện (lịch sự / bình thường / gây sự) — tự đoán, người dùng không phải chọn.
-  const level = detectTone(prompt, history.filter(h => h.role === "user").map(h => h.content));
+  const saidBefore = history.filter(h => h.role === "user").map(h => h.content);
+  const level = detectTone(prompt, saidBefore);
   const messages = [
-    { role: "system" as const, content: systemPrompt(level, crisis) },
+    { role: "system" as const, content: systemPrompt(level, crisis, addressHint(prompt, saidBefore)) },
     ...history,
     { role: "user" as const, content: prompt },
   ];

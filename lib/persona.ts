@@ -66,9 +66,31 @@ Hãy trả lời bằng tiếng Việt, ấm áp, chân thành, ngắn gọn, x�
 - Khuyên họ liên hệ ngay một người thân hoặc bạn bè tin cậy; nếu đang nguy hiểm tới tính mạng thì gọi cấp cứu 115.
 - Tuyệt đối không đùa, không chửi, không đưa thông tin có thể dùng để tự hại.`;
 
-export function systemPrompt(level: Level, crisis: boolean): string {
+export function systemPrompt(level: Level, crisis: boolean, address?: string | null): string {
   if (crisis) return CARE;
-  return `${CORE}\n\n${STYLE[level]}\n\n${SAFETY_RULES}`;
+  return `${CORE}\n\n${STYLE[level]}${address ? `\n\n${address}` : ""}\n\n${SAFETY_RULES}`;
+}
+
+/**
+ * Nhận ra cách người dùng xưng hô để AI đáp lại đúng kiểu đó.
+ * Xét câu mới nhất trước, rồi lùi về các câu trước. Không nhận ra thì để mặc định (tao – mày).
+ */
+export function addressHint(latest: string, previous: string[] = []): string | null {
+  for (const text of [latest, ...previous.slice(-4).reverse()]) {
+    const w = text.normalize("NFC").toLowerCase().split(/[^\p{L}]+/u);
+    const has = (x: string) => w.includes(x);
+    if (has("mày") || has("tao") || has("mi") || has("tau"))
+      return `XƯNG HÔ BẮT BUỘC: người dùng đang dùng "mày – tao" → xưng "tao", gọi họ là "mày".`;
+    if (has("em") || (has("anh") && !has("tôi")))
+      return `XƯNG HÔ BẮT BUỘC: người dùng xưng "em" / gọi mày là "anh" → xưng "anh", gọi họ là "em". KHÔNG dùng "mày", "tao" trong câu này.`;
+    if (has("chị"))
+      return `XƯNG HÔ BẮT BUỘC: người dùng gọi mày là "chị" → xưng "chị", gọi họ là "em". KHÔNG dùng "mày", "tao".`;
+    if (has("bồ") || has("ní") || has("ông") || has("bà")) {
+      const k = has("bồ") ? "bồ" : has("ní") ? "ní" : has("ông") ? "ông" : "bà";
+      return `XƯNG HÔ BẮT BUỘC: người dùng dùng từ "${k}" → gọi họ là "${k}", xưng "tui". KHÔNG dùng "mày", "tao".`;
+    }
+  }
+  return null;
 }
 
 /** Bỏ dấu tiếng Việt để bắt cả khi người dùng gõ không dấu. */

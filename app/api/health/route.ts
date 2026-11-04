@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { availableModels, chatModels, sttModel, groq, modelParams } from "@/lib/llm";
-import { systemPrompt } from "@/lib/persona";
+import { systemPrompt, addressHint } from "@/lib/persona";
 import { hit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
@@ -21,14 +21,15 @@ export async function GET(req: Request) {
   const level = new URL(req.url).searchParams.get("probe");
   let probe: unknown;
   if ((level === "hien" || level === "khia" || level === "gat") && (await hit("probe:all", 30)).ok) {
+    const question = level === "gat" ? "thủ đô việt nam là gì vậy đm" : level === "hien" ? "dạ cho em hỏi thủ đô việt nam là gì ạ" : "thủ đô của việt nam là gì";
     const started = Date.now();
     try {
       const r = await groq.chat.completions.create({
         model: chat[0],
         max_tokens: 800,
         messages: [
-          { role: "system", content: systemPrompt(level, false) },
-          { role: "user", content: level === "gat" ? "thủ đô việt nam là gì vậy đm" : level === "hien" ? "dạ cho em hỏi thủ đô việt nam là gì ạ" : "thủ đô của việt nam là gì" },
+          { role: "system", content: systemPrompt(level, false, addressHint(question)) },
+          { role: "user", content: question },
         ],
         ...modelParams(chat[0]),
       } as Parameters<typeof groq.chat.completions.create>[0] & { stream?: false });
