@@ -1,5 +1,5 @@
 import { groq, chatModels, forgetModels, friendlyAIError, modelParams, thinkFilter } from "@/lib/llm";
-import { LEVELS, isLevel, systemPrompt, detectCrisis, type Level } from "@/lib/persona";
+import { LEVELS, systemPrompt, detectCrisis, detectTone } from "@/lib/persona";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
 
@@ -37,7 +37,7 @@ function cleanHistory(raw: unknown): Turn[] {
 }
 
 export async function POST(req: Request) {
-  let body: { prompt?: string; history?: unknown; level?: string; adult?: boolean };
+  let body: { prompt?: string; history?: unknown; adult?: boolean };
   try { body = await req.json(); } catch { return json({ error: "Dữ liệu gửi lên bị lỗi." }, 400); }
 
   const prompt = (body.prompt || "").trim();
@@ -45,9 +45,8 @@ export async function POST(req: Request) {
   if (prompt.length > MAX_PROMPT_CHARS)
     return json({ error: `Viết sớ à? Tối đa ${MAX_PROMPT_CHARS} ký tự thôi.` }, 400);
 
-  const level: Level = isLevel(body.level) ? body.level : "khia";
-  if (LEVELS[level].adult && body.adult !== true)
-    return json({ error: "Chế độ Mất dạy cần xác nhận đủ 18 tuổi." }, 403);
+  // VNAI xưng mày – tao và có thể văng tục → chỉ dành cho người đã xác nhận đủ 18 tuổi.
+  if (body.adult !== true) return json({ error: "Cần xác nhận đủ 18 tuổi trước khi trò chuyện." }, 403);
 
   // ── Giới hạn: mỗi máy N câu/ngày, toàn trang M câu/ngày (giữ ví tiền Groq) ──
   const mine = await hit(`chat:${clientId(req)}`, LIMITS.chatPerClient);
@@ -56,10 +55,13 @@ export async function POST(req: Request) {
   const global = await hit("chat:all", LIMITS.chatGlobal);
   if (!global.ok) return json({ error: "Hôm nay VNAI chửi nhiều quá khản cả cổ rồi. Mai quay lại nhé.", limit: true }, 429);
 
+  const history = cleanHistory(body.history);
   const crisis = detectCrisis(prompt);
+  // Không khí cuộc trò chuyện (lịch sự / bình thường / gây sự) — tự đoán, người dùng không phải chọn.
+  const level = detectTone(prompt, history.filter(h => h.role === "user").map(h => h.content));
   const messages = [
     { role: "system" as const, content: systemPrompt(level, crisis) },
-    ...cleanHistory(body.history),
+    ...history,
     { role: "user" as const, content: prompt },
   ];
 
@@ -97,7 +99,7 @@ export async function POST(req: Request) {
         }
       }
       if (!answer) throw lastError ?? new Error("Empty answer");
-      send({ type: "done", remaining: mine.remaining, crisis });
+      send({ type: "done", remaining: mine.remaining, crisis, tone: level });
     } catch (e) {
       send({ type: "error", message: friendlyAIError(e) });
     } finally {

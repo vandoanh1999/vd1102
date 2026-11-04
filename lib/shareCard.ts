@@ -36,8 +36,8 @@ export async function shareRoast(question: string, answer: string): Promise<"sha
 
   const head = el("div", { display: "flex", alignItems: "center", gap: "18px" });
   head.append(
-    el("div", { fontSize: "64px" }, "🤬"),
-    el("div", { fontSize: "44px", fontWeight: "800", letterSpacing: "1px", color: "#fb7185" }, "VNAI — AI mỏ hỗn"),
+    el("div", { width: "26px", height: "26px", borderRadius: "50%", background: "#ff3b3b", boxShadow: "0 0 24px #ff3b3b" }),
+    el("div", { fontSize: "44px", fontWeight: "800", letterSpacing: "1px", color: "#f1f5f9" }, "VNAI"),
   );
 
   const q = el("div", {
@@ -57,7 +57,7 @@ export async function shareRoast(question: string, answer: string): Promise<"sha
     marginTop: "12px", display: "flex", justifyContent: "space-between", alignItems: "center",
     fontSize: "30px", color: "#cbd5e1",
   });
-  foot.append(el("span", {}, "Hỏi ngu là ăn chửi 😈"), el("span", { fontWeight: "700", color: "#fda4af" }, "vina-ai.com"));
+  foot.append(el("span", {}, "Hỏi ngu là ăn chửi"), el("span", { fontWeight: "700", color: "#fda4af" }, "vina-ai.com"));
 
   card.append(head, q, a, foot);
   document.body.appendChild(card);
@@ -73,7 +73,7 @@ export async function shareRoast(question: string, answer: string): Promise<"sha
     const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
     if (nav.share && nav.canShare?.({ files: [file] })) {
       try {
-        await nav.share({ files: [file], title: "Bị AI chửi", text: "Hỏi thử đi rồi biết 😈 vina-ai.com" });
+        await nav.share({ files: [file], title: "Bị AI chửi", text: "Hỏi thử đi rồi biết: vina-ai.com" });
         return "shared";
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return "shared"; // người dùng tự huỷ

@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import MessageBubble, { type ChatMessage } from "@/components/MessageBubble";
 import Sidebar from "@/components/Sidebar";
 import type { Activity, Mood } from "@/components/MoodFace";
-import { LEVELS, type Level } from "@/lib/persona";
+import { detectTone, type Level } from "@/lib/persona";
 import { shareRoast } from "@/lib/shareCard";
 import { getConv, saveConv, newConvId, type StoredMessage } from "@/lib/localConvs";
 import {
@@ -24,11 +24,7 @@ const NO_VI_VOICE =
 const MOOD_BG: Record<Mood, string> = { hien: "#211f1d", khia: "#201c19", gat: "#0d0707", care: "#1b1f24" };
 const MOOD_ACCENT: Record<Mood, string> = { hien: "#ffd27a", khia: "#ffad4d", gat: "#ff3b3b", care: "#9fd0ff" };
 
-const GREETING: Record<Level, { title: string; sub: string }> = {
-  hien: { title: "Chào bạn, hôm nay muốn hỏi gì nào?", sub: "Hỏi gì mình cũng trả lời, có trêu nhẹ một chút thôi." },
-  khia: { title: "Lại định hỏi gì đây?", sub: "Trả lời đúng hết. Hỏi ngu thì ráng chịu." },
-  gat: { title: "Hỏi lẹ đi, tao bận.", sub: "Biết tuốt, mồm thối. Đủ 18 tuổi mới được vào đây." },
-};
+const GREETING = { title: "Hỏi gì thì hỏi lẹ đi.", sub: "Cái gì tao cũng biết. Hỏi ngu thì ráng chịu." };
 
 const SUGGESTIONS = [
   "1 + 1 bằng mấy?",
@@ -54,13 +50,12 @@ export default function ChatBox() {
 
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
-  const [level, setLevel] = useState<Level>("khia");
-  const [adult, setAdult] = useState(false);
-  const [askAdult, setAskAdult] = useState(false);
+  // null = chưa đọc xong bộ nhớ máy (tránh hộp xác nhận nháy lên rồi tắt)
+  const [adult, setAdult] = useState<boolean | null>(null);
+  const [declined, setDeclined] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [sharingIdx, setSharingIdx] = useState<number | null>(null);
   const [drawer, setDrawer] = useState(false);
-  const [levelMenu, setLevelMenu] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
 
   // giọng nói
@@ -72,23 +67,18 @@ export default function ChatBox() {
   const recorderRef = useRef<VoiceRecorder | null>(null);
   const callRef = useRef(false);
   const speakOnRef = useRef(false);
-  const levelRef = useRef<Level>("khia");
+  const toneRef = useRef<Level>("khia");
   const adultRef = useRef(false);
   useEffect(() => { speakOnRef.current = speakOn; }, [speakOn]);
-  useEffect(() => { levelRef.current = level; }, [level]);
-  useEffect(() => { adultRef.current = adult; }, [adult]);
+  useEffect(() => { adultRef.current = adult === true; }, [adult]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const levelMenuRef = useRef<HTMLDivElement>(null);
 
   // Nhớ cấp độ, xác nhận 18+ và "Đọc to" của người dùng trên máy này.
   useEffect(() => {
-    const isAdult = store.get("vnai.adult") === "1";
-    setAdult(isAdult);
-    const saved = store.get("vnai.level") as Level | null;
-    if (saved && saved in LEVELS && (!LEVELS[saved].adult || isAdult)) setLevel(saved);
+    setAdult(store.get("vnai.adult") === "1");
     setSpeakOn(store.get("vnai.speak") === "1");
     setCanVoice(voiceSupported());
     recorderRef.current = new VoiceRecorder();
@@ -113,15 +103,6 @@ export default function ChatBox() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
 
-  // Đóng menu chọn mức độ khi bấm ra ngoài
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (levelMenuRef.current && !levelMenuRef.current.contains(e.target as Node)) setLevelMenu(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
   // Ô nhập tự giãn theo nội dung
   useEffect(() => {
     const el = inputRef.current;
@@ -130,17 +111,7 @@ export default function ChatBox() {
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, [input]);
 
-  const pickLevel = (l: Level) => {
-    setLevelMenu(false);
-    if (LEVELS[l].adult && !adult) { setAskAdult(true); return; }
-    setLevel(l); store.set("vnai.level", l);
-  };
-
-  const confirmAdult = () => {
-    setAdult(true); store.set("vnai.adult", "1");
-    setLevel("gat"); store.set("vnai.level", "gat");
-    setAskAdult(false);
-  };
+  const confirmAdult = () => { setAdult(true); store.set("vnai.adult", "1"); };
 
   const fail = (msg: string) => setMessages(prev => [...prev, { role: "error", content: msg }]);
 
@@ -167,7 +138,6 @@ export default function ChatBox() {
         body: JSON.stringify({
           prompt,
           history: past.slice(-20).map(m => ({ role: m.role, content: m.content })),
-          level: levelRef.current,
           adult: adultRef.current,
         }),
       });
@@ -235,7 +205,7 @@ export default function ChatBox() {
 
   const speakAnswer = async (text: string) => {
     setPhase("speaking");
-    await speak(text, { rate: levelRef.current === "gat" ? 1.12 : 1.05 });
+    await speak(text, { rate: toneRef.current === "gat" ? 1.12 : 1.05 });
     setPhase("idle");
   };
 
@@ -339,7 +309,13 @@ export default function ChatBox() {
   /* ───────────── Gương mặt: tâm trạng + hành động ───────────── */
 
   const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
-  const mood: Mood = lastAssistant?.crisis ? "care" : level;
+  // Không khí tự đoán từ lời người dùng: lịch sự → mặt cười, bình thường → nhếch mép, chửi bậy → mắt đỏ.
+  const tone: Level = useMemo(() => {
+    const said = messages.filter(m => m.role === "user").map(m => m.content);
+    return said.length ? detectTone(said[said.length - 1], said.slice(0, -1)) : "khia";
+  }, [messages]);
+  toneRef.current = tone;
+  const mood: Mood = lastAssistant?.crisis ? "care" : tone;
   const streaming = thinking && messages[messages.length - 1]?.role === "assistant";
   const activity: Activity =
     phase === "listening" ? "listening"
@@ -349,7 +325,7 @@ export default function ChatBox() {
   const empty = messages.length === 0;
   const bg = MOOD_BG[mood];
   const accent = MOOD_ACCENT[mood];
-  const greet = GREETING[level];
+  const greet = GREETING;
   const hasText = !!input.trim();
 
   return (
@@ -415,7 +391,7 @@ export default function ChatBox() {
               {thinking && messages[messages.length - 1]?.role === "user" && (
                 <div className="flex items-center gap-3 text-sm text-[#a39e96]">
                   <span className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: accent }} />
-                  {level === "gat" ? "Đang nghĩ cách chửi mày..." : level === "khia" ? "Đang nghĩ câu khịa..." : "Đang nghĩ..."}
+                  Đang nghĩ...
                 </div>
               )}
               <div ref={bottomRef} />
@@ -436,32 +412,6 @@ export default function ChatBox() {
                 disabled={thinking || phase !== "idle"} maxLength={4000}
                 className="w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 placeholder:text-[#8a857d] focus:outline-none disabled:opacity-60" />
               <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
-                {/* Chọn mức độ chửi */}
-                <div ref={levelMenuRef} className="relative">
-                  <button onClick={() => setLevelMenu(v => !v)}
-                    className="h-8 px-3 rounded-full text-[13px] flex items-center gap-1.5 border border-white/10 hover:bg-white/5">
-                    <span>{LEVELS[level].emoji}</span><span>{LEVELS[level].label}</span>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m6 9 6 6 6-6" /></svg>
-                  </button>
-                  {levelMenu && (
-                    <div className="absolute bottom-10 left-0 w-60 rounded-2xl border border-white/10 bg-[#2b2926] shadow-2xl p-1.5 z-30">
-                      {(Object.keys(LEVELS) as Level[]).map(l => (
-                        <button key={l} onClick={() => pickLevel(l)}
-                          className={`w-full text-left px-3 py-2 rounded-xl flex items-start gap-3 hover:bg-white/5 ${level === l ? "bg-white/5" : ""}`}>
-                          <span className="text-lg leading-6">{LEVELS[l].emoji}</span>
-                          <span className="flex-1">
-                            <span className="block text-sm">{LEVELS[l].label}{LEVELS[l].adult ? " · 18+" : ""}</span>
-                            <span className="block text-xs text-[#a39e96]">
-                              {l === "hien" ? "Trêu nhẹ, lịch sự" : l === "khia" ? "Mỉa mai, cay mà sang" : "Xưng mày tao, chửi gắt"}
-                            </span>
-                          </span>
-                          {level === l && <span className="text-sm" style={{ color: accent }}>✓</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
                 <button onClick={toggleSpeak} title={speakOn ? "Tắt đọc to" : "Bật đọc to câu trả lời"}
                   className={`w-8 h-8 grid place-items-center rounded-full border transition-colors ${speakOn ? "border-[var(--accent)] text-[var(--accent)]" : "border-white/10 text-[#a39e96] hover:bg-white/5"}`}>
                   {speakOn
@@ -513,7 +463,7 @@ export default function ChatBox() {
                 {activity === "listening" ? "Đang nghe..." : activity === "thinking" ? "Đang nghĩ câu chửi..." :
                   activity === "speaking" ? "Đang chửi..." : "..."}
               </div>
-              <div className="text-xs text-[#a39e96] mt-1">{LEVELS[level].emoji} {LEVELS[level].label} · nói xong im 1 giây là nó tự trả lời</div>
+              <div className="text-xs text-[#a39e96] mt-1">Nói xong im khoảng 1 giây là nó tự trả lời</div>
             </div>
             <div className="flex gap-3">
               {phase === "speaking" && (
@@ -527,20 +477,33 @@ export default function ChatBox() {
         )}
       </main>
 
-      {/* Hộp xác nhận 18+ */}
-      {askAdult && (
-        <div className="fixed inset-0 z-50 bg-black/70 grid place-items-center p-4">
-          <div className="w-full max-w-sm rounded-3xl border border-red-500/30 bg-[#1a1514] p-6 space-y-3">
-            <div className="text-lg font-semibold text-red-300">🤬 Chế độ Mất dạy (18+)</div>
-            <p className="text-sm text-[#cfc9c0]">
-              AI sẽ xưng mày – tao và chửi rất gắt. Nó vẫn không đụng tới vùng miền, tôn giáo, giới tính,
-              ngoại hình hay chuyện riêng tư của bạn.
-            </p>
-            <p className="text-sm text-[#cfc9c0]">Bạn xác nhận đã đủ 18 tuổi và tự nguyện ăn chửi?</p>
-            <div className="flex gap-2 pt-1">
-              <button onClick={confirmAdult} className="flex-1 h-11 rounded-full bg-red-600 text-sm font-medium">Tôi đủ 18, chửi đi</button>
-              <button onClick={() => setAskAdult(false)} className="flex-1 h-11 rounded-full border border-white/15 text-sm">Thôi, sợ rồi</button>
-            </div>
+      {/* Xác nhận độ tuổi — hiện một lần trên mỗi máy */}
+      {adult === false && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm grid place-items-center p-4">
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-[#1f1d1b] p-6 space-y-3">
+            {declined ? (
+              <>
+                <div className="text-lg font-semibold">Hẹn gặp lại</div>
+                <p className="text-sm text-[#cfc9c0]">VNAI chỉ dành cho người từ 18 tuổi trở lên.</p>
+              </>
+            ) : (
+              <>
+                <div className="text-lg font-semibold">Trước khi bắt đầu</div>
+                <p className="text-sm text-[#cfc9c0] leading-6">
+                  VNAI nói chuyện thẳng, xưng mày – tao, cà khịa và có thể văng tục. Nó không xúc phạm vùng miền,
+                  tôn giáo, giới tính hay ngoại hình của bất kỳ ai.
+                </p>
+                <p className="text-sm text-[#cfc9c0]">Dịch vụ chỉ dành cho người từ 18 tuổi trở lên.</p>
+                <div className="flex gap-2 pt-2">
+                  <button onClick={confirmAdult} className="flex-1 h-11 rounded-full text-black text-sm font-medium" style={{ background: accent }}>
+                    Tôi đủ 18 tuổi
+                  </button>
+                  <button onClick={() => setDeclined(true)} className="flex-1 h-11 rounded-full border border-white/15 text-sm">
+                    Rời đi
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

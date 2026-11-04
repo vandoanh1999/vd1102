@@ -21,7 +21,7 @@ export default function MessageBubble({
   if (m.role === "error") {
     return (
       <div className="rounded-2xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">
-        ⚠️ {m.content}
+        {m.content}
       </div>
     );
   }
@@ -39,10 +39,9 @@ export default function MessageBubble({
   // Câu trả lời của AI: không đóng khung, chữ thoáng như các ứng dụng chat quen thuộc.
   return (
     <div className="group flex gap-3">
-      <div className="shrink-0 mt-1 w-7 h-7 rounded-full grid place-items-center text-[13px]"
-        style={{ background: "color-mix(in srgb, var(--accent) 22%, transparent)", boxShadow: "0 0 14px color-mix(in srgb, var(--accent) 45%, transparent)" }}>
-        {m.crisis ? "🤍" : "🤬"}
-      </div>
+      {/* Chấm sáng thay cho ảnh đại diện, đổi màu theo tâm trạng gương mặt */}
+      <div className="shrink-0 mt-2 w-3.5 h-3.5 rounded-full"
+        style={{ background: "var(--accent)", boxShadow: "0 0 12px var(--accent), 0 0 3px var(--accent)" }} />
       <div className="min-w-0 flex-1">
         <div className="text-[15px] leading-7">
           <Markdown text={m.content || ""} />
