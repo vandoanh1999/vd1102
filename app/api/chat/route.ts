@@ -18,6 +18,15 @@ type Turn = { role: "user" | "assistant"; content: string };
 
 const json = (body: unknown, status: number) => Response.json(body, { status });
 
+/** Thời gian hiện tại theo giờ Việt Nam — để AI trả lời đúng "hôm nay thứ mấy", "mấy giờ rồi". */
+function nowVN(): string {
+  const parts = new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(new Date());
+  return `THỜI GIAN HIỆN TẠI (giờ Việt Nam): ${parts}.`;
+}
+
 /**
  * Lịch sử do trình duyệt gửi lên (cuộc trò chuyện lưu trên máy người dùng).
  * Chỉ nhận đúng dạng, cắt bớt từ cũ nhất cho vừa ngân sách ký tự.
@@ -83,6 +92,7 @@ export async function POST(req: Request) {
 
   const messages = [
     { role: "system" as const, content: systemPrompt(persona, level, crisis, address) },
+    { role: "system" as const, content: nowVN() },
     ...(mood && !crisis ? [{ role: "system" as const, content: moodInstruction(mood.z) }] : []),
     // Xúc xắc đã quyết là lần này KHÔNG seen → bảo AI trả lời (cộc lốc) để cùng một câu "alo" lúc rep lúc không.
     ...(mood && !crisis && (event === "pointless" || event === "repeat")
