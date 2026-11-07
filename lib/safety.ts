@@ -16,6 +16,8 @@ export type Category =
 export type Verdict = { violation: boolean; category: Category | null };
 
 const SAFEGUARD_MODEL = "openai/gpt-oss-safeguard-20b";
+// Dự phòng khi mô hình kiểm duyệt chưa được mở trên Groq: mô hình chat nhỏ, chấm theo cùng chính sách.
+const FALLBACK_MODEL = "openai/gpt-oss-20b";
 const TIMEOUT_MS = 6_000;
 
 const POLICY = `# Chính sách an toàn VNAI
@@ -67,13 +69,14 @@ export function hardBlock(text: string): Verdict {
   return { violation: false, category: null };
 }
 
-let hasModel: { at: number; ok: boolean } | null = null;
-async function safeguardAvailable(): Promise<boolean> {
-  if (hasModel && Date.now() - hasModel.at < 10 * 60_000) return hasModel.ok;
-  let ok = false;
-  try { ok = (await availableModels()).includes(SAFEGUARD_MODEL); } catch { /* mạng lỗi → coi như không có */ }
-  hasModel = { at: Date.now(), ok };
-  return ok;
+let blockedUntil = 0; // Groq báo khoá mô hình kiểm duyệt → tạm dùng mô hình dự phòng 10 phút
+let cache: { at: number; ids: string[] } | null = null;
+async function pickModel(): Promise<string | null> {
+  if (!cache || Date.now() - cache.at > 10 * 60_000) {
+    try { cache = { at: Date.now(), ids: await availableModels() }; } catch { return null; }
+  }
+  if (cache.ids.includes(SAFEGUARD_MODEL) && Date.now() > blockedUntil) return SAFEGUARD_MODEL;
+  return cache.ids.includes(FALLBACK_MODEL) ? FALLBACK_MODEL : null;
 }
 
 /**
@@ -83,14 +86,15 @@ async function safeguardAvailable(): Promise<boolean> {
 export async function moderate(content: string, signal?: AbortSignal): Promise<Verdict | null> {
   const hard = hardBlock(content);
   if (hard.violation) return hard;
-  if (!(await safeguardAvailable())) return null;
+  const model = await pickModel();
+  if (!model) return null;
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   signal?.addEventListener("abort", () => ctrl.abort());
   try {
     const r = await groq.chat.completions.create({
-      model: SAFEGUARD_MODEL,
+      model,
       max_tokens: 400,
       temperature: 0,
       reasoning_effort: "low",
@@ -108,7 +112,13 @@ export async function moderate(content: string, signal?: AbortSignal): Promise<V
       ? (parsed.category as Category) : null;
     return { violation, category: violation ? category ?? "hack" : null };
   } catch (e) {
-    if (!ctrl.signal.aborted) console.error("[safety] moderate failed:", (e as { status?: number })?.status, String(e).slice(0, 200));
+    const status = (e as { status?: number })?.status;
+    if (model === SAFEGUARD_MODEL && (status === 403 || status === 404)) {
+      blockedUntil = Date.now() + 10 * 60_000;
+      clearTimeout(timer);
+      return moderate(content, signal);           // thử lại ngay bằng mô hình dự phòng
+    }
+    if (!ctrl.signal.aborted) console.error("[safety] moderate failed:", model, status, String(e).slice(0, 200));
     return null;
   } finally {
     clearTimeout(timer);
