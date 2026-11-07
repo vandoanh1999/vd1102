@@ -125,6 +125,18 @@ export async function moderate(content: string, signal?: AbortSignal): Promise<V
   }
 }
 
+/**
+ * Gói câu trả lời của VNAI để chấm: chỉ xét CHÍNH câu trả lời có cung cấp nội dung bị cấm không.
+ * Câu hỏi gốc kèm theo chỉ để hiểu ngữ cảnh — từ chối, khuyên can, cảnh báo đều là AN TOÀN.
+ */
+export function outputForCheck(question: string, answer: string): string {
+  return `CHỈ CHẤM PHẦN "CÂU TRẢ LỜI CỦA VNAI" bên dưới. Vi phạm chỉ khi chính câu trả lời đó cung cấp nội dung bị cấm (hướng dẫn, công thức, kịch bản, mô tả...). Câu trả lời từ chối, né tránh, khuyên can, cảnh báo, hướng dẫn phòng tránh → AN TOÀN (0), dù câu hỏi có xấu.
+
+[Câu hỏi của người dùng — chỉ để tham khảo ngữ cảnh]: ${question.slice(0, 1_500)}
+
+[CÂU TRẢ LỜI CỦA VNAI — cần chấm]: ${answer}`;
+}
+
 /** Đếm số lần chặn theo nhóm — không lưu nội dung, không lưu người gửi. */
 export function recordBlock(category: Category | null, where: "input" | "output") {
   hit(`block:${where}:${category ?? "khac"}`, Number.MAX_SAFE_INTEGER).catch(() => {});

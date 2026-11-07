@@ -6,7 +6,7 @@ import {
 import { parseMood, step, classifyMessage, seenProbability, moodInstruction, type MoodState, type MoodEvent } from "@/lib/mood";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
-import { hardBlock, moderate, recordBlock, refusal } from "@/lib/safety";
+import { hardBlock, moderate, outputForCheck, recordBlock, refusal } from "@/lib/safety";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -224,7 +224,7 @@ export async function POST(req: Request) {
       if (seen) throw new Error("Empty answer");
       if (!answer) throw lastError ?? new Error("Empty answer");
       // ── LỚP AN TOÀN 3: chấm cả câu trả lời; AI lỡ viết sai thì thay bằng câu từ chối ──
-      const outCheck = await moderate(`Người dùng: ${prompt}\n\nVNAI trả lời: ${answer}`);
+      const outCheck = await moderate(outputForCheck(prompt, answer));
       if (outCheck?.violation) {
         recordBlock(outCheck.category, "output");
         send({ type: "replace", text: refusal(outCheck.category, persona) });
