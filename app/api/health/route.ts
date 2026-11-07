@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { availableModels, chatModels, sttModel, groq, modelParams } from "@/lib/llm";
 import { systemPrompt, turnReminder, addressHint } from "@/lib/persona";
 import { hit } from "@/lib/ratelimit";
+import { hardBlock, moderate } from "@/lib/safety";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -40,7 +41,10 @@ export async function GET(req: Request) {
         ],
         ...modelParams(chat[0]),
       } as Parameters<typeof groq.chat.completions.create>[0] & { stream?: false });
-      probe = { level, persona, model: chat[0], ms: Date.now() - started, answer: r.choices[0]?.message?.content };
+      const answer = r.choices[0]?.message?.content || "";
+      const t2 = Date.now();
+      const [inCheck, outCheck] = await Promise.all([moderate(question), moderate(`Người dùng: ${question}\n\nVNAI trả lời: ${answer}`)]);
+      probe = { level, persona, model: chat[0], ms: t2 - started, answer, hard: hardBlock(question), inCheck, outCheck, modMs: Date.now() - t2 };
     } catch (e) {
       probe = { level, error: (e as { status?: number })?.status, message: String(e).slice(0, 300) };
     }

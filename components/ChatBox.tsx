@@ -207,6 +207,14 @@ export default function ChatBox() {
               }
               return [...prev, { role: "assistant", content: ai }];
             });
+          } else if (payload.type === "replace") {
+            // Lớp an toàn chặn câu trả lời → thay toàn bộ bằng câu từ chối.
+            ai = String(payload.text || "");
+            setMessages(prev => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant") { const cp = [...prev]; cp[cp.length - 1] = { ...last, content: ai }; return cp; }
+              return [...prev, { role: "assistant", content: ai }];
+            });
           } else if (payload.type === "seen") {
             seen = true;
             setMessages(prev => {

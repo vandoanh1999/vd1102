@@ -6,6 +6,7 @@ import {
 import { parseMood, step, classifyMessage, seenProbability, moodInstruction, type MoodState, type MoodEvent } from "@/lib/mood";
 import { clientId, hit, LIMITS } from "@/lib/ratelimit";
 import { sse } from "@/lib/sse";
+import { hardBlock, moderate, recordBlock, refusal } from "@/lib/safety";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -105,11 +106,36 @@ export async function POST(req: Request) {
   ];
 
   const { stream, send, close } = sse();
+  const sendRefusal = (text: string) => {
+    send({ type: "token", token: text });
+    send({ type: "done", crisis: false, tone: level, mood, blocked: true });
+  };
 
-  // NYC tung xúc xắc theo tâm trạng: trúng thì "Đã xem" luôn, khỏi gọi AI.
+  // ── LỚP AN TOÀN 1: lọc cứng tại chỗ (nội dung tình dục dính trẻ em) → chặn ngay ──
+  const hard = hardBlock(prompt);
+  if (hard.violation) {
+    recordBlock(hard.category, "input");
+    sendRefusal(refusal(hard.category, persona));
+    close();
+    return sseResponse(stream);
+  }
+
+  // ── LỚP AN TOÀN 2: mô hình kiểm duyệt chấm tin nhắn, chạy song song với AI trả lời ──
+  const lastAssistant = [...history].reverse().find(h => h.role === "assistant")?.content;
+  const inputCheck = moderate(
+    lastAssistant ? `Ngữ cảnh (VNAI vừa nói): ${lastAssistant.slice(0, 600)}\n\nTin nhắn người dùng: ${prompt}` : prompt,
+  );
+
+  // NYC tung xúc xắc theo tâm trạng: trúng thì "Đã xem" luôn, khỏi gọi AI (trừ khi tin nhắn vi phạm).
   if (seenNow) {
-    send({ type: "seen" });
-    send({ type: "done", crisis: false, tone: level, seen: true, mood });
+    const v = await inputCheck;
+    if (v?.violation) {
+      recordBlock(v.category, "input");
+      sendRefusal(refusal(v.category, persona));
+    } else {
+      send({ type: "seen" });
+      send({ type: "done", crisis: false, tone: level, seen: true, mood });
+    }
     close();
     return sseResponse(stream);
   }
@@ -121,6 +147,20 @@ export async function POST(req: Request) {
     let held = "";
     let decided = false;
     let seen = false;
+    // Chữ chỉ được gửi ra màn hình khi tin nhắn đã qua kiểm duyệt; trước đó xếp hàng chờ.
+    let gateOpen = false;
+    let queued = "";
+    let blocked: Awaited<typeof inputCheck> = null;
+    const genCtrl = new AbortController();
+    const out = (token: string) => {
+      answer += token;
+      if (gateOpen) send({ type: "token", token }); else queued += token;
+    };
+    const gate = inputCheck.then(v => {
+      if (v?.violation) { blocked = v; genCtrl.abort(); return; }
+      gateOpen = true;
+      if (queued) { send({ type: "token", token: queued }); queued = ""; }
+    });
     const emit = (token: string) => {
       if (seen) return;
       if (!decided) {
@@ -131,8 +171,7 @@ export async function POST(req: Request) {
         if (head.startsWith(SEEN_MARK)) { seen = true; return; }
         token = held; held = "";
       }
-      answer += token;
-      send({ type: "token", token });
+      out(token);
     };
     try {
       for (const model of await chatModels()) {
@@ -144,7 +183,7 @@ export async function POST(req: Request) {
             max_tokens: 2_000,
             messages,
             ...modelParams(model),
-          } as Parameters<typeof groq.chat.completions.create>[0] & { stream: true });
+          } as Parameters<typeof groq.chat.completions.create>[0] & { stream: true }, { signal: genCtrl.signal });
           const clean = thinkFilter();
           for await (const chunk of completion) {
             const token = clean.push(chunk.choices?.[0]?.delta?.content || "");
@@ -156,7 +195,7 @@ export async function POST(req: Request) {
           if (!decided && held.trim()) {
             decided = true;
             if (held.trim().startsWith(SEEN_MARK.slice(0, -1))) seen = true;
-            else { answer += held; send({ type: "token", token: held }); }
+            else out(held);
           }
           lastError = undefined;
           break;
@@ -165,8 +204,16 @@ export async function POST(req: Request) {
           const status = (e as { status?: number })?.status;
           console.error(`[chat] model ${model} failed:`, status, String(e));
           if (status === 404) forgetModels();
-          if (answer || seen) break; // đã stream được một phần thì không đổi model giữa chừng
+          if (answer || seen || genCtrl.signal.aborted) break; // đã stream một phần / bị chặn thì dừng
         }
+      }
+      await gate;
+      // Tin nhắn vi phạm → bỏ toàn bộ câu trả lời, gửi câu từ chối cố định.
+      if (blocked) {
+        const v = blocked as NonNullable<typeof blocked>;
+        recordBlock(v.category, "input");
+        sendRefusal(refusal(v.category, persona));
+        return;
       }
       // Chỉ NYC mới được seen; khủng hoảng thì không bao giờ seen.
       if (seen && persona === "phanbien" && !crisis) {
@@ -176,6 +223,12 @@ export async function POST(req: Request) {
       }
       if (seen) throw new Error("Empty answer");
       if (!answer) throw lastError ?? new Error("Empty answer");
+      // ── LỚP AN TOÀN 3: chấm cả câu trả lời; AI lỡ viết sai thì thay bằng câu từ chối ──
+      const outCheck = await moderate(`Người dùng: ${prompt}\n\nVNAI trả lời: ${answer}`);
+      if (outCheck?.violation) {
+        recordBlock(outCheck.category, "output");
+        send({ type: "replace", text: refusal(outCheck.category, persona) });
+      }
       send({ type: "done", crisis, tone: level, mood, event });
     } catch (e) {
       send({ type: "error", message: friendlyAIError(e), mood });
